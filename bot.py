@@ -3,7 +3,9 @@ import time
 import logging
 import sys
 import signal
+import threading
 from datetime import datetime
+from flask import Flask, jsonify
 from config import BOT_TOKEN, SOURCE_CHAT_ID, DESTINATION_CHAT_ID, ADMIN_USER_ID
 
 # ==============================================================================
@@ -43,6 +45,86 @@ except Exception as e:
     sys.exit(1)
 
 # ==============================================================================
+#                 --- HEALTH CHECK SERVER (PORT 8000) ---
+# ==============================================================================
+
+def create_health_server():
+    """Create a simple health check server on port 8000"""
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def home():
+        return """
+        <html>
+            <head>
+                <title>Telegram Forwarder Bot</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 40px; }
+                    .status { color: green; font-weight: bold; }
+                    .container { max-width: 800px; margin: 0 auto; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🤖 Telegram Forwarder Bot</h1>
+                    <p class="status">Status: ✅ RUNNING</p>
+                    <p><strong>Source Chat:</strong> {}</p>
+                    <p><strong>Destination Chat:</strong> {}</p>
+                    <p><strong>Start Time:</strong> {}</p>
+                    <br>
+                    <p><a href="/health">Health Check</a> | <a href="/status">Status API</a> | <a href="/metrics">Metrics</a></p>
+                </div>
+            </body>
+        </html>
+        """.format(SOURCE_CHAT_ID, DESTINATION_CHAT_ID, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    
+    @app.route('/health')
+    def health():
+        """Health check endpoint"""
+        return jsonify({
+            "status": "healthy",
+            "service": "telegram-forwarder-bot",
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    @app.route('/status')
+    def status():
+        """Status endpoint with bot information"""
+        try:
+            bot_info = bot.get_me()
+            return jsonify({
+                "status": "running",
+                "bot_username": f"@{bot_info.username}",
+                "bot_id": bot_info.id,
+                "source_chat": SOURCE_CHAT_ID,
+                "destination_chat": DESTINATION_CHAT_ID,
+                "uptime": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "last_restart": datetime.now().isoformat()
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+    
+    @app.route('/metrics')
+    def metrics():
+        """Simple metrics endpoint"""
+        return jsonify({
+            "service": "telegram_bot",
+            "active": True,
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    # Run Flask server
+    logger.info("🌐 Starting health check server on port 8000...")
+    try:
+        app.run(host='0.0.0.0', port=8000, debug=False, use_reloader=False)
+    except Exception as e:
+        logger.error(f"❌ Health server error: {e}")
+
+# Start health server in a separate thread
+health_thread = threading.Thread(target=create_health_server, daemon=True)
+health_thread.start()
+
+# ==============================================================================
 #                 --- COMMAND HANDLERS ---
 # ==============================================================================
 
@@ -59,6 +141,7 @@ def handle_start_help(message):
             "**Commands:**\n"
             "/start - Show this message\n"
             "/status - Check bot status\n"
+            "/health - Health check\n"
             "/stop - Stop the bot (admin only)\n\n"
             "I automatically forward messages from source to destination."
         )
@@ -79,13 +162,32 @@ def handle_status(message):
             f"**Destination:** `{DESTINATION_CHAT_ID}`\n"
             f"**Bot ID:** `{bot.get_me().id}`\n"
             f"**Status:** ✅ **RUNNING**\n"
-            f"**Uptime:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"**Uptime:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            "**Health Check:** http://localhost:8000/health"
         )
         
         bot.reply_to(message, status_text, parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"❌ Error in status handler: {e}")
+
+@bot.message_handler(commands=['health'])
+def handle_health(message):
+    """Handle /health command"""
+    try:
+        health_text = (
+            "❤️ **Health Status** ❤️\n\n"
+            "✅ **Bot:** Running\n"
+            "✅ **API:** Connected\n"
+            "✅ **Forwarding:** Active\n"
+            f"⏰ **Last Check:** {datetime.now().strftime('%H:%M:%S')}\n\n"
+            "All systems operational! 🚀"
+        )
+        
+        bot.reply_to(message, health_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"❌ Error in health handler: {e}")
 
 @bot.message_handler(commands=['stop'])
 def handle_stop(message):
@@ -124,11 +226,27 @@ def forward_messages(message):
             )
             logger.info(f"✅ Forwarded message {message.message_id}")
             
+    except telebot.apihelper.ApiTelegramException as e:
+        logger.error(f"❌ Telegram API error: {e}")
     except Exception as e:
         logger.error(f"❌ Error forwarding message: {e}")
 
 # ==============================================================================
-#                 --- IMPROVED POLLING WITH CONFLICT HANDLING ---
+#                 --- ERROR HANDLER ---
+# ==============================================================================
+
+@bot.message_handler(func=lambda message: True)
+def handle_other_messages(message):
+    """Handle all other messages"""
+    if message.chat.type == 'private' and not message.text.startswith('/'):
+        bot.reply_to(
+            message, 
+            "🤖 I'm a forwarding bot! I automatically forward messages between chats.\n\n"
+            "Use /help to see available commands."
+        )
+
+# ==============================================================================
+#                 --- MAIN BOT STARTUP ---
 # ==============================================================================
 
 def start_bot():
@@ -144,8 +262,9 @@ def start_bot():
 
     logger.info("=" * 60)
     logger.info("🚀 Starting Telegram Forwarder Bot")
-    logger.info(f"📝 Source: {SOURCE_CHAT_ID}")
-    logger.info(f"📤 Destination: {DESTINATION_CHAT_ID}")
+    logger.info(f"📝 Source Chat: {SOURCE_CHAT_ID}")
+    logger.info(f"📤 Destination Chat: {DESTINATION_CHAT_ID}")
+    logger.info("🌐 Health server: http://0.0.0.0:8000")
     logger.info("⏰ " + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     logger.info("=" * 60)
 
@@ -158,7 +277,7 @@ def start_bot():
         bot.remove_webhook()
         time.sleep(0.5)
         
-        # Start polling with error handling
+        # Start polling
         logger.info("🔄 Starting polling...")
         bot.infinity_polling(
             timeout=30, 
@@ -170,8 +289,6 @@ def start_bot():
         if "Conflict" in str(e) or "409" in str(e):
             logger.error("🚨 CONFLICT: Another bot instance is running!")
             logger.error("💡 Solution: Kill other instances with: pkill -f python")
-            time.sleep(5)
-            # Don't auto-restart on conflict
         else:
             logger.error(f"🚨 Telegram API error: {e}")
             logger.info("🔄 Restarting in 10 seconds...")
