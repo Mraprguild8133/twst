@@ -3,8 +3,12 @@ import time
 import logging
 from datetime import datetime
 
-# Import configuration
-from config import config
+# Import configuration - directly import variables
+from config import (
+    BOT_TOKEN, SOURCE_CHAT_ID, DESTINATION_CHAT_ID, 
+    FORWARD_CONTENT_TYPES, ADMIN_USER_ID,
+    POLLING_TIMEOUT, LONG_POLLING_TIMEOUT
+)
 
 # ==============================================================================
 #                 --- INITIALIZATION ---
@@ -22,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 try:
-    bot = telebot.TeleBot(config.BOT_TOKEN)
+    bot = telebot.TeleBot(BOT_TOKEN)
 except Exception as e:
     logger.error(f"Error initializing TeleBot: {e}")
     exit()
@@ -31,16 +35,16 @@ except Exception as e:
 #                 --- HANDLERS AND LOGIC ---
 # ==============================================================================
 
-@bot.message_handler(content_types=config.FORWARD_CONTENT_TYPES)
+@bot.message_handler(content_types=FORWARD_CONTENT_TYPES)
 def forward_messages(message):
     """
     Listens for messages and forwards them if from the source chat.
     """
-    if message.chat.id == config.SOURCE_CHAT_ID:
+    if message.chat.id == SOURCE_CHAT_ID:
         try:
             bot.forward_message(
-                chat_id=config.DESTINATION_CHAT_ID,
-                from_chat_id=config.SOURCE_CHAT_ID,
+                chat_id=DESTINATION_CHAT_ID,
+                from_chat_id=SOURCE_CHAT_ID,
                 message_id=message.message_id
             )
             logger.info(f"✅ Forwarded message ID {message.message_id}")
@@ -57,14 +61,14 @@ def send_welcome(message):
     """Responds to commands with bot status."""
     welcome_text = (
         "🤖 Telegram Forwarder Bot Status 🤖\n\n"
-        f"Source: `{config.SOURCE_CHAT_ID}`\n"
-        f"Destination: `{config.DESTINATION_CHAT_ID}`\n"
+        f"Source: `{SOURCE_CHAT_ID}`\n"
+        f"Destination: `{DESTINATION_CHAT_ID}`\n"
         f"Last restart: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "Ensure I'm an **administrator** in both chats."
     )
     
     # Only respond in private or destination chat
-    if message.chat.type == 'private' or message.chat.id == config.DESTINATION_CHAT_ID:
+    if message.chat.type == 'private' or message.chat.id == DESTINATION_CHAT_ID:
         try:
             bot.reply_to(message, welcome_text, parse_mode='Markdown')
         except Exception as e:
@@ -73,11 +77,11 @@ def send_welcome(message):
 @bot.message_handler(commands=['restart'])
 def restart_bot(message):
     """Admin-only restart command (optional)"""
-    if (config.ADMIN_USER_ID and 
-        str(message.from_user.id) == config.ADMIN_USER_ID):
+    if (ADMIN_USER_ID and 
+        str(message.from_user.id) == ADMIN_USER_ID):
         bot.reply_to(message, "🔄 Restarting bot...")
         logger.info("Bot restart initiated by admin")
-        raise SystemExit  # This will trigger the restart in main()
+        raise SystemExit
     else:
         bot.reply_to(message, "❌ Unauthorized.")
 
@@ -89,21 +93,21 @@ def main():
     """Main function to start the bot."""
     logger.info("=========================================================")
     logger.info("🚀 Forwarder Bot starting...")
-    logger.info(f"Source: {config.SOURCE_CHAT_ID} | Destination: {config.DESTINATION_CHAT_ID}")
+    logger.info(f"Source: {SOURCE_CHAT_ID} | Destination: {DESTINATION_CHAT_ID}")
     logger.info("Press Ctrl+C to stop the bot.")
     logger.info("=========================================================")
     
     # Validate configuration
-    if (config.BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN_HERE' or 
-        config.SOURCE_CHAT_ID == -1001234567890 or 
-        config.DESTINATION_CHAT_ID == -1009876543210):
+    if (BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN_HERE' or 
+        SOURCE_CHAT_ID == -1001234567890 or 
+        DESTINATION_CHAT_ID == -1009876543210):
         logger.error("ERROR: Please update the configuration in config.py or .env file")
         return
     
     try:
         bot.infinity_polling(
-            timeout=config.POLLING_TIMEOUT,
-            long_polling_timeout=config.LONG_POLLING_TIMEOUT
+            timeout=POLLING_TIMEOUT,
+            long_polling_timeout=LONG_POLLING_TIMEOUT
         )
     except KeyboardInterrupt:
         logger.info("🛑 Bot stopped by user")
