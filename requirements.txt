@@ -1,3 +1,5 @@
 pyTeleBot
 python-dotenv
 pyTelegramBotAPI
+requests
+urllib3
