@@ -170,7 +170,7 @@ def handle_other_messages(message):
 def main():
     """Main function to start the bot"""
     # Validate configuration
-    if BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN_HERE':
+    if BOT_TOKEN == 'BOT_TOKEN':
         logger.error("❌ ERROR: Please set BOT_TOKEN in your .env file")
         return
         
