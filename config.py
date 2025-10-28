@@ -9,7 +9,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 RSS_URL = os.getenv("RSS_URL", "https://www.gadgets360.com/rss/news")
 
 # Bot Settings
-ADMIN_IDS = [123456789]  # Replace with your Telegram user ID
+ADMIN_IDS = [6300568870]  # Replace with your Telegram user ID
 UPDATE_INTERVAL = 300  # 5 minutes for automatic updates
 
 # File paths
