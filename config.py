@@ -6,7 +6,7 @@ load_dotenv()  # Load environment variables from .env file
 
 # Bot Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-RSS_URL = os.getenv("RSS_URL", "https://www.gadgets360.com/rss/news")
+RSS_URL = os.getenv("RSS_URL")
 
 # Bot Settings
 ADMIN_IDS = [6300568870]  # Replace with your Telegram user ID
