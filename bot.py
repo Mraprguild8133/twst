@@ -1,385 +1,279 @@
-import telebot
-import time
+#!/usr/bin/env python3
+# --------------------------------------------------------------------------------------
+# Telegram RSS Bot for Gadgets 360 News
+# --------------------------------------------------------------------------------------
+# Dependencies:
+# pip install python-telegram-bot feedparser beautifulsoup4 python-dotenv
+# --------------------------------------------------------------------------------------
+
 import logging
-import sys
-import signal
-import threading
-import traceback
+import feedparser
+import re
+import json
+import os
 from datetime import datetime
-from flask import Flask, jsonify
-from config import BOT_TOKEN, SOURCE_CHAT_ID, DESTINATION_CHAT_ID, ADMIN_USER_ID
+from telegram import Update, constants
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ==============================================================================
-#                 --- INITIALIZATION ---
-# ==============================================================================
+# Import configuration
+from config import config
 
-# Set up logging with more detailed format
+# Use configuration values
+BOT_TOKEN = config.BOT_TOKEN
+RSS_URL = config.RSS_URL
+SEEN_LINKS_FILE = config.SEEN_LINKS_FILE
+
+# Ensure directories exist
+os.makedirs("data", exist_ok=True)
+os.makedirs("logs", exist_ok=True)
+
+# Configure logging
 logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.FileHandler(config.LOG_FILE),
         logging.StreamHandler()
     ]
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Global variable to control bot running state
-bot_running = True
-
-def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully"""
-    global bot_running
-    logger.info(f"🛑 Received signal {signum}, shutting down gracefully...")
-    bot_running = False
-    sys.exit(0)
-
-# Register signal handlers
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-# Initialize bot with error handling
-try:
-    bot = telebot.TeleBot(BOT_TOKEN)
-    logger.info("✅ Bot object created successfully")
-except Exception as e:
-    logger.error(f"❌ Error initializing TeleBot: {e}")
-    logger.error(traceback.format_exc())
-    sys.exit(1)
-
-# ==============================================================================
-#                 --- HEALTH CHECK SERVER (PORT 8000) ---
-# ==============================================================================
-
-def create_health_server():
-    """Create a simple health check server on port 8000"""
+# Persistent storage for seen links
+def load_seen_links():
+    """Load seen links from JSON file."""
     try:
-        app = Flask(__name__)
-        
-        @app.route('/')
-        def home():
-            return """
-            <html>
-                <head>
-                    <title>Telegram Forwarder Bot</title>
-                    <style>
-                        body { font-family: Arial, sans-serif; margin: 40px; }
-                        .status { color: green; font-weight: bold; }
-                        .container { max-width: 800px; margin: 0 auto; }
-                        .error { color: red; }
-                    </style>
-                </head>
-                <body>
-                    <div class="container">
-                        <h1>🤖 Telegram Forwarder Bot</h1>
-                        <p class="status">Status: ✅ RUNNING</p>
-                        <p><strong>Source Chat:</strong> {}</p>
-                        <p><strong>Destination Chat:</strong> {}</p>
-                        <p><strong>Start Time:</strong> {}</p>
-                        <br>
-                        <p><a href="/health">Health Check</a> | <a href="/status">Status API</a> | <a href="/metrics">Metrics</a></p>
-                    </div>
-                </body>
-            </html>
-            """.format(SOURCE_CHAT_ID, DESTINATION_CHAT_ID, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        
-        @app.route('/health')
-        def health():
-            """Health check endpoint"""
-            try:
-                # Test bot connection
-                bot.get_me()
-                return jsonify({
-                    "status": "healthy",
-                    "service": "telegram-forwarder-bot",
-                    "timestamp": datetime.now().isoformat(),
-                    "bot_connected": True
-                })
-            except Exception as e:
-                return jsonify({
-                    "status": "unhealthy",
-                    "service": "telegram-forwarder-bot",
-                    "error": str(e),
-                    "bot_connected": False
-                }), 500
-        
-        @app.route('/status')
-        def status():
-            """Status endpoint with bot information"""
-            try:
-                bot_info = bot.get_me()
-                return jsonify({
-                    "status": "running",
-                    "bot_username": f"@{bot_info.username}",
-                    "bot_id": bot_info.id,
-                    "source_chat": SOURCE_CHAT_ID,
-                    "destination_chat": DESTINATION_CHAT_ID,
-                    "timestamp": datetime.now().isoformat(),
-                    "health": "ok"
-                })
-            except Exception as e:
-                return jsonify({
-                    "status": "error",
-                    "message": str(e),
-                    "timestamp": datetime.now().isoformat()
-                }), 500
-        
-        @app.route('/metrics')
-        def metrics():
-            """Simple metrics endpoint"""
-            return jsonify({
-                "service": "telegram_bot",
-                "active": True,
-                "timestamp": datetime.now().isoformat()
-            })
-        
-        # Run Flask server
-        logger.info("🌐 Starting health check server on port 8000...")
-        app.run(host='0.0.0.0', port=8000, debug=False, use_reloader=False)
-        
+        if os.path.exists(SEEN_LINKS_FILE):
+            with open(SEEN_LINKS_FILE, 'r') as f:
+                data = json.load(f)
+                return set(data.get('seen_links', []))
     except Exception as e:
-        logger.error(f"❌ Health server error: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error loading seen links: {e}")
+    return set()
 
-# Start health server in a separate thread (only if not already running)
-try:
-    health_thread = threading.Thread(target=create_health_server, daemon=True)
-    health_thread.start()
-    logger.info("✅ Health server thread started")
-except Exception as e:
-    logger.error(f"❌ Failed to start health server: {e}")
-
-# ==============================================================================
-#                 --- COMMAND HANDLERS ---
-# ==============================================================================
-
-@bot.message_handler(commands=['start', 'help'])
-def handle_start_help(message):
-    """Handle /start and /help commands"""
+def save_seen_links(seen_links):
+    """Save seen links to JSON file."""
     try:
-        bot_info = bot.get_me()
-        welcome_text = (
-            "🤖 **Telegram Forwarder Bot** 🤖\n\n"
-            "**Status:** ✅ Active\n"
-            f"**Source Chat:** `{SOURCE_CHAT_ID}`\n"
-            f"**Destination Chat:** `{DESTINATION_CHAT_ID}`\n"
-            f"**Bot Username:** @{bot_info.username}\n\n"
-            "**Commands:**\n"
-            "/start - Show this message\n"
-            "/status - Check bot status\n"
-            "/health - Health check\n"
-            "/stop - Stop the bot (admin only)\n\n"
-            "I automatically forward messages from source to destination."
-        )
-        
-        bot.reply_to(message, welcome_text, parse_mode='Markdown')
-        logger.info(f"✅ Sent welcome message to user {message.from_user.id}")
-        
+        data = {
+            'seen_links': list(seen_links),
+            'last_updated': datetime.now().isoformat()
+        }
+        with open(SEEN_LINKS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
     except Exception as e:
-        logger.error(f"❌ Error in start/help handler: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error saving seen links: {e}")
 
-@bot.message_handler(commands=['status'])
-def handle_status(message):
-    """Handle /status command"""
-    try:
-        bot_info = bot.get_me()
-        status_text = (
-            "📊 **Bot Status** 📊\n\n"
-            f"**Bot:** @{bot_info.username} (ID: {bot_info.id})\n"
-            f"**Source:** `{SOURCE_CHAT_ID}`\n"
-            f"**Destination:** `{DESTINATION_CHAT_ID}`\n"
-            f"**Status:** ✅ **RUNNING**\n"
-            f"**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            "**Health Check:** http://localhost:8000/health"
-        )
-        
-        bot.reply_to(message, status_text, parse_mode='Markdown')
-        logger.info(f"✅ Sent status to user {message.from_user.id}")
-        
-    except Exception as e:
-        logger.error(f"❌ Error in status handler: {e}")
-        logger.error(traceback.format_exc())
-        bot.reply_to(message, "❌ Error getting bot status")
+# Global set for seen links
+SEEN_LINKS = load_seen_links()
 
-@bot.message_handler(commands=['health'])
-def handle_health(message):
-    """Handle /health command"""
-    try:
-        # Test bot connection
-        bot_info = bot.get_me()
-        health_text = (
-            "❤️ **Health Status** ❤️\n\n"
-            "✅ **Bot:** Running\n"
-            "✅ **API:** Connected\n"
-            "✅ **Forwarding:** Active\n"
-            f"🤖 **Bot:** @{bot_info.username}\n"
-            f"⏰ **Last Check:** {datetime.now().strftime('%H:%M:%S')}\n\n"
-            "All systems operational! 🚀"
-        )
-        
-        bot.reply_to(message, health_text, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"❌ Error in health handler: {e}")
-        bot.reply_to(message, "❌ Health check failed - bot not connected")
-
-@bot.message_handler(commands=['stop'])
-def handle_stop(message):
-    """Handle /stop command (admin only)"""
-    try:
-        if ADMIN_USER_ID and str(message.from_user.id) == ADMIN_USER_ID:
-            bot.reply_to(message, "🛑 Stopping bot...")
-            logger.info("🛑 Bot stop initiated by admin")
-            global bot_running
-            bot_running = False
-            sys.exit(0)
-        else:
-            bot.reply_to(message, "❌ Unauthorized. This command is for admins only.")
-            logger.warning(f"❌ Unauthorized stop attempt by user {message.from_user.id}")
-            
-    except Exception as e:
-        logger.error(f"❌ Error in stop handler: {e}")
-        logger.error(traceback.format_exc())
-
-# ==============================================================================
-#                 --- MESSAGE FORWARDING LOGIC ---
-# ==============================================================================
-
-@bot.message_handler(
-    content_types=[
-        'text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker',
-        'animation', 'poll', 'location', 'contact', 'dice', 'video_note'
-    ]
-)
-def forward_messages(message):
-    """Forward messages from source chat to destination chat"""
-    try:
-        if message.chat.id == SOURCE_CHAT_ID:
-            logger.info(f"📨 Received message {message.message_id} from source chat")
-            
-            bot.forward_message(
-                chat_id=DESTINATION_CHAT_ID,
-                from_chat_id=SOURCE_CHAT_ID,
-                message_id=message.message_id
-            )
-            
-            logger.info(f"✅ Forwarded message {message.message_id} from {SOURCE_CHAT_ID} to {DESTINATION_CHAT_ID}")
-            
-    except telebot.apihelper.ApiTelegramException as e:
-        error_msg = f"❌ Telegram API error forwarding message {message.message_id}: {e}"
-        logger.error(error_msg)
-        
-        # Specific error handling
-        if "bot was blocked" in str(e):
-            logger.error("💡 The bot was blocked by a user")
-        elif "chat not found" in str(e):
-            logger.error("💡 Chat not found - check if bot was added to the chat")
-        elif "not enough rights" in str(e):
-            logger.error("💡 Bot doesn't have permission to forward messages")
-        elif "message to forward not found" in str(e):
-            logger.error("💡 Message was deleted or not accessible")
-            
-    except Exception as e:
-        logger.error(f"❌ Unexpected error forwarding message {message.message_id}: {e}")
-        logger.error(traceback.format_exc())
-
-# ==============================================================================
-#                 --- ERROR HANDLER FOR OTHER MESSAGES ---
-# ==============================================================================
-
-@bot.message_handler(func=lambda message: True)
-def handle_other_messages(message):
-    """Handle all other messages that don't match previous handlers"""
-    try:
-        if message.chat.type == 'private' and not message.text.startswith('/'):
-            bot.reply_to(
-                message, 
-                "🤖 I'm a forwarding bot! I automatically forward messages between chats.\n\n"
-                "Use /help to see available commands."
-            )
-            logger.info(f"💬 Responded to general message from user {message.from_user.id}")
-    except Exception as e:
-        logger.error(f"❌ Error handling other message: {e}")
-        logger.error(traceback.format_exc())
-
-# ==============================================================================
-#                 --- MAIN BOT STARTUP WITH ERROR RECOVERY ---
-# ==============================================================================
-
-def start_bot():
-    """Start the bot with comprehensive error handling"""
-    # Validate configuration
-    if BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN_HERE':
-        logger.error("❌ ERROR: Please set BOT_TOKEN in your .env file")
-        sys.exit(1)
-        
-    if SOURCE_CHAT_ID == -1001234567890 or DESTINATION_CHAT_ID == -1009876543210:
-        logger.error("❌ ERROR: Please set SOURCE_CHAT_ID and DESTINATION_CHAT_ID in your .env file")
-        sys.exit(1)
-
-    logger.info("=" * 60)
-    logger.info("🚀 Starting Telegram Forwarder Bot")
-    logger.info(f"📝 Source Chat: {SOURCE_CHAT_ID}")
-    logger.info(f"📤 Destination Chat: {DESTINATION_CHAT_ID}")
-    logger.info("🌐 Health server: http://0.0.0.0:8000")
-    logger.info("⏰ " + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    logger.info("=" * 60)
-
-    max_retries = 5
-    retry_count = 0
+def extract_image_url(entry):
+    """
+    Attempts to find a featured image URL in the RSS entry fields.
+    Prioritizes media:content, then looks for an enclosure, then in summary HTML.
+    """
+    # 1. Check for media_content (common for featured images)
+    if 'media_content' in entry and entry.media_content:
+        for media in entry.media_content:
+            if 'url' in media:
+                return media['url']
     
-    while retry_count < max_retries and bot_running:
+    # 2. Check for enclosures (often used for podcasts/media, but sometimes images)
+    if 'enclosures' in entry and entry.enclosures:
+        for enclosure in entry.enclosures:
+            if enclosure.get('type', '').startswith('image/') and 'href' in enclosure:
+                return enclosure['href']
+
+    # 3. Fallback: Search the summary/description HTML for an <img> tag
+    summary_text = entry.get('summary', '') or entry.get('description', '')
+    if summary_text:
+        # Simple regex to find the first image src in the summary
+        img_match = re.search(r'<img[^>]+src="([^">]+)"', summary_text)
+        if img_match:
+            return img_match.group(1)
+            
+    return None
+
+def clean_html(text):
+    """Remove HTML tags from text and clean it up."""
+    if not text:
+        return "No summary available."
+    
+    # Remove HTML tags
+    clean = re.sub('<[^<]+?>', '', text)
+    # Replace multiple spaces with single space
+    clean = re.sub('\s+', ' ', clean)
+    # Strip leading/trailing whitespace
+    return clean.strip()
+
+def format_news_message(entry):
+    """Format the news entry into a nice Telegram message."""
+    title = entry.title
+    link = entry.link
+    summary = clean_html(entry.get('summary') or entry.get('description', ''))
+    
+    # Truncate summary if too long
+    if len(summary) > 400:
+        summary = summary[:397] + "..."
+    
+    # Format published date if available
+    published = ""
+    if hasattr(entry, 'published_parsed') and entry.published_parsed:
         try:
-            # Test bot connection
-            logger.info("🔌 Testing bot connection...")
-            bot_info = bot.get_me()
-            logger.info(f"✅ Bot connected: @{bot_info.username} (ID: {bot_info.id})")
-            
-            # Clear any existing webhook to avoid conflicts
-            logger.info("🔄 Clearing existing webhooks...")
-            bot.remove_webhook()
-            time.sleep(1)
-            
-            # Start polling
-            logger.info("🔄 Starting polling...")
-            bot.infinity_polling(
-                timeout=30, 
-                long_polling_timeout=10,
-                logger_level=logging.ERROR
+            from time import mktime
+            from datetime import datetime
+            dt = datetime.fromtimestamp(mktime(entry.published_parsed))
+            published = f"📅 {dt.strftime('%Y-%m-%d %H:%M')}\n\n"
+        except:
+            pass
+    
+    message_text = (
+        f"🚀 <b>LATEST GADGETS 360 NEWS</b>\n\n"
+        f"<b>{title}</b>\n\n"
+        f"{published}"
+        f"{summary}\n\n"
+        f"🔗 <a href='{link}'>Read Full Article on Gadgets 360</a>"
+    )
+    
+    return message_text, summary
+
+# Command handler for /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a welcome message when the command /start is issued."""
+    user = update.effective_user
+    await update.message.reply_html(
+        config.WELCOME_MESSAGE.format(user_name=user.mention_html())
+    )
+    logger.info(f"User {user.id} started the bot")
+
+# Command handler for /help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show help information."""
+    await update.message.reply_html(config.HELP_MESSAGE)
+    logger.info(f"User {update.effective_user.id} requested help")
+
+# Command handler for /latest
+async def get_latest_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetches and sends the latest, unsent article from the RSS feed."""
+    user = update.effective_user
+    await update.message.reply_text("📡 Fetching the latest news from Gadgets 360...")
+    logger.info(f"User {user.id} requested latest news")
+
+    try:
+        # Parse the RSS feed
+        feed = feedparser.parse(RSS_URL)
+
+        if not feed.entries:
+            await update.message.reply_text("❌ Could not find any news entries in the feed. Please try again later.")
+            logger.warning("No entries found in RSS feed")
+            return
+
+        # Get the very first (latest) entry
+        entry = feed.entries[0]
+        
+        # Check if we have already processed this link
+        if entry.link in SEEN_LINKS:
+            await update.message.reply_text(
+                "ℹ️ The latest article has already been sent. "
+                "Gadgets 360 updates their feed periodically. "
+                "Try again in a few minutes for newer content!"
             )
-            
-        except telebot.apihelper.ApiException as e:
-            if "Conflict" in str(e) or "409" in str(e):
-                logger.error("🚨 CONFLICT: Another bot instance is running!")
-                logger.error("💡 Solution: Kill other instances with: pkill -f python")
-                break  # Don't retry on conflict
-            else:
-                logger.error(f"🚨 Telegram API error: {e}")
-                retry_count += 1
-                if retry_count < max_retries:
-                    wait_time = 10 * retry_count
-                    logger.info(f"🔄 Retrying in {wait_time} seconds... (Attempt {retry_count}/{max_retries})")
-                    time.sleep(wait_time)
-                else:
-                    logger.error("❌ Max retries reached. Giving up.")
-                    
-        except KeyboardInterrupt:
-            logger.info("🛑 Bot stopped by user (Ctrl+C)")
-            break
-            
-        except Exception as e:
-            logger.error(f"🚨 Unexpected error in main loop: {e}")
-            logger.error(traceback.format_exc())
-            retry_count += 1
-            if retry_count < max_retries:
-                wait_time = 10 * retry_count
-                logger.info(f"🔄 Retrying in {wait_time} seconds... (Attempt {retry_count}/{max_retries})")
-                time.sleep(wait_time)
-            else:
-                logger.error("❌ Max retries reached. Giving up.")
+            logger.info(f"Duplicate article detected: {entry.link}")
+            return
 
-    logger.info("👋 Bot shutdown complete")
+        # Extract and format details
+        message_text, summary = format_news_message(entry)
+        
+        # Look for the image
+        image_url = extract_image_url(entry)
+        
+        logger.info(f"Sending new article: {entry.title}")
 
-if __name__ == '__main__':
-    start_bot()
+        # Send the news item
+        if image_url:
+            try:
+                # Use send_photo if an image is found
+                await update.message.reply_photo(
+                    photo=image_url,
+                    caption=message_text,
+                    parse_mode=constants.ParseMode.HTML,
+                    disable_notification=True
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send photo, falling back to text: {e}")
+                await update.message.reply_html(
+                    text=message_text,
+                    disable_web_page_preview=False,
+                    disable_notification=True
+                )
+        else:
+            # Fallback to simple message if no image is found
+            await update.message.reply_html(
+                text=message_text,
+                disable_web_page_preview=False,
+                disable_notification=True
+            )
+        
+        # Mark the link as seen and save
+        SEEN_LINKS.add(entry.link)
+        save_seen_links(SEEN_LINKS)
+        
+        logger.info(f"Successfully sent and saved article: {entry.title}")
+
+    except Exception as e:
+        logger.error(f"Error fetching or sending news: {e}")
+        await update.message.reply_text(
+            "❌ Sorry, there was an error processing the RSS feed. "
+            "Please try again in a few moments."
+        )
+
+# Command handler for /stats (admin only)
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show bot statistics (admin only)."""
+    user = update.effective_user
+    if user.id not in config.ADMIN_IDS:
+        await update.message.reply_text("❌ This command is for administrators only.")
+        return
+    
+    stats_text = (
+        f"🤖 <b>Bot Statistics</b>\n\n"
+        f"• Total tracked articles: {len(SEEN_LINKS)}\n"
+        f"• RSS Feed: {RSS_URL}\n"
+        f"• Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"• Active users: 1 (basic implementation)"
+    )
+    
+    await update.message.reply_html(stats_text)
+    logger.info(f"Admin {user.id} requested stats")
+
+def main() -> None:
+    """Start the bot."""
+    # Validate bot token
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not BOT_TOKEN:
+        logger.error("Please set your BOT_TOKEN in config.py or .env file")
+        print("❌ FATAL ERROR: Please set your BOT_TOKEN in config.py or .env file")
+        return
+
+    # Create the Application
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("latest", get_latest_news))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+
+    # Start the bot
+    logger.info("Bot is starting...")
+    print("🤖 Bot is starting. Press Ctrl-C to stop.")
+    
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+        print("\n👋 Bot stopped.")
+    except Exception as e:
+        logger.error(f"Bot crashed: {e}")
+        print(f"❌ Bot crashed: {e}")
+
+if __name__ == "__main__":
+    main()
