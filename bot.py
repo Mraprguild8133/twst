@@ -15,7 +15,7 @@ from datetime import datetime
 from telegram import Update, constants
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Import configuration - FIXED IMPORT
+# Import configuration
 import config
 
 # Use configuration values
@@ -72,32 +72,34 @@ def extract_image_url(entry):
     Attempts to find a featured image URL in the RSS entry fields.
     Prioritizes media:content, then looks for an enclosure, then in summary HTML.
     """
-    # 1. Check for media_content (common for featured images)
-    if 'media_content' in entry and entry.media_content:
-        for media in entry.media_content:
-            if hasattr(media, 'get') and media.get('url'):
-                return media['url']
-            elif hasattr(media, 'url'):
-                return media.url
-    
-    # 2. Check for enclosures (often used for podcasts/media, but sometimes images)
-    if 'enclosures' in entry and entry.enclosures:
-        for enclosure in entry.enclosures:
-            enclosure_type = enclosure.get('type', '') if hasattr(enclosure, 'get') else getattr(enclosure, 'type', '')
-            if enclosure_type.startswith('image/'):
-                if hasattr(enclosure, 'get') and enclosure.get('href'):
-                    return enclosure['href']
-                elif hasattr(enclosure, 'href'):
-                    return enclosure.href
+    try:
+        # 1. Check for media_content (common for featured images)
+        if hasattr(entry, 'media_content') and entry.media_content:
+            for media in entry.media_content:
+                if hasattr(media, 'get') and media.get('url'):
+                    return media['url']
+                elif hasattr(media, 'url'):
+                    return media.url
+        
+        # 2. Check for enclosures
+        if hasattr(entry, 'enclosures') and entry.enclosures:
+            for enclosure in entry.enclosures:
+                enclosure_type = enclosure.get('type', '') if hasattr(enclosure, 'get') else getattr(enclosure, 'type', '')
+                if enclosure_type.startswith('image/'):
+                    if hasattr(enclosure, 'get') and enclosure.get('href'):
+                        return enclosure['href']
+                    elif hasattr(enclosure, 'href'):
+                        return enclosure.href
 
-    # 3. Fallback: Search the summary/description HTML for an <img> tag
-    summary_text = entry.get('summary', '') or entry.get('description', '')
-    if summary_text:
-        # Simple regex to find the first image src in the summary
-        img_match = re.search(r'<img[^>]+src="([^">]+)"', summary_text)
-        if img_match:
-            return img_match.group(1)
-            
+        # 3. Fallback: Search the summary/description HTML for an <img> tag
+        summary_text = entry.get('summary', '') or entry.get('description', '')
+        if summary_text:
+            img_match = re.search(r'<img[^>]+src="([^">]+)"', summary_text)
+            if img_match:
+                return img_match.group(1)
+    except Exception as e:
+        logger.warning(f"Error extracting image URL: {e}")
+                
     return None
 
 def clean_html(text):
@@ -105,66 +107,98 @@ def clean_html(text):
     if not text:
         return "No summary available."
     
-    # Remove HTML tags
-    clean = re.sub('<[^<]+?>', '', text)
-    # Replace multiple spaces with single space
-    clean = re.sub('\s+', ' ', clean)
-    # Strip leading/trailing whitespace
-    return clean.strip()
+    try:
+        # Remove HTML tags
+        clean = re.sub('<[^<]+?>', '', text)
+        # Replace multiple spaces with single space
+        clean = re.sub('\s+', ' ', clean)
+        # Strip leading/trailing whitespace
+        return clean.strip()
+    except Exception as e:
+        logger.warning(f"Error cleaning HTML: {e}")
+        return str(text)[:500]  # Return raw text truncated
 
 def format_news_message(entry):
     """Format the news entry into a nice Telegram message."""
-    title = entry.title
-    link = entry.link
-    summary = clean_html(entry.get('summary') or entry.get('description', ''))
+    try:
+        title = entry.title if hasattr(entry, 'title') else "No Title"
+        link = entry.link if hasattr(entry, 'link') else "#"
+        summary = clean_html(entry.get('summary') or entry.get('description', ''))
+        
+        # Truncate summary if too long
+        if len(summary) > 400:
+            summary = summary[:397] + "..."
+        
+        # Format published date if available
+        published = ""
+        if hasattr(entry, 'published_parsed') and entry.published_parsed:
+            try:
+                from time import mktime
+                dt = datetime.fromtimestamp(mktime(entry.published_parsed))
+                published = f"📅 {dt.strftime('%Y-%m-%d %H:%M')}\n\n"
+            except:
+                pass
+        
+        message_text = (
+            f"🚀 <b>LATEST GADGETS 360 NEWS</b>\n\n"
+            f"<b>{title}</b>\n\n"
+            f"{published}"
+            f"{summary}\n\n"
+            f"🔗 <a href='{link}'>Read Full Article on Gadgets 360</a>"
+        )
+        
+        return message_text, summary
+    except Exception as e:
+        logger.error(f"Error formatting news message: {e}")
+        error_text = "❌ Error formatting news article. Please try again."
+        return error_text, ""
+
+# Error handler function
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle errors in the telegram bot."""
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
     
-    # Truncate summary if too long
-    if len(summary) > 400:
-        summary = summary[:397] + "..."
-    
-    # Format published date if available
-    published = ""
-    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-        try:
-            from time import mktime
-            dt = datetime.fromtimestamp(mktime(entry.published_parsed))
-            published = f"📅 {dt.strftime('%Y-%m-%d %H:%M')}\n\n"
-        except:
-            pass
-    
-    message_text = (
-        f"🚀 <b>LATEST GADGETS 360 NEWS</b>\n\n"
-        f"<b>{title}</b>\n\n"
-        f"{published}"
-        f"{summary}\n\n"
-        f"🔗 <a href='{link}'>Read Full Article on Gadgets 360</a>"
-    )
-    
-    return message_text, summary
+    # Try to notify the user about the error
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ Sorry, an error occurred while processing your request. "
+                "Please try again later."
+            )
+    except Exception as e:
+        logger.error(f"Error while sending error message: {e}")
 
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message when the command /start is issued."""
-    user = update.effective_user
-    await update.message.reply_html(
-        config.WELCOME_MESSAGE.format(user_name=user.mention_html())
-    )
-    logger.info(f"User {user.id} started the bot")
+    try:
+        user = update.effective_user
+        await update.message.reply_html(
+            config.WELCOME_MESSAGE.format(user_name=user.mention_html())
+        )
+        logger.info(f"User {user.id} started the bot")
+    except Exception as e:
+        logger.error(f"Error in start command: {e}")
+        await update.message.reply_text("Welcome! There was an error displaying the welcome message.")
 
 # Command handler for /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show help information."""
-    await update.message.reply_html(config.HELP_MESSAGE)
-    logger.info(f"User {update.effective_user.id} requested help")
+    try:
+        await update.message.reply_html(config.HELP_MESSAGE)
+        logger.info(f"User {update.effective_user.id} requested help")
+    except Exception as e:
+        logger.error(f"Error in help command: {e}")
+        await update.message.reply_text("Help: Use /latest to get the latest news.")
 
 # Command handler for /latest
 async def get_latest_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetches and sends the latest, unsent article from the RSS feed."""
-    user = update.effective_user
-    await update.message.reply_text("📡 Fetching the latest news from Gadgets 360...")
-    logger.info(f"User {user.id} requested latest news")
-
     try:
+        user = update.effective_user
+        await update.message.reply_text("📡 Fetching the latest news from Gadgets 360...")
+        logger.info(f"User {user.id} requested latest news")
+
         # Parse the RSS feed
         feed = feedparser.parse(RSS_URL)
 
@@ -226,30 +260,34 @@ async def get_latest_news(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info(f"Successfully sent and saved article: {entry.title}")
 
     except Exception as e:
-        logger.error(f"Error fetching or sending news: {e}")
+        logger.error(f"Error in get_latest_news command: {e}")
         await update.message.reply_text(
-            "❌ Sorry, there was an error processing the RSS feed. "
+            "❌ Sorry, there was an error fetching the latest news. "
             "Please try again in a few moments."
         )
 
 # Command handler for /stats (admin only)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show bot statistics (admin only)."""
-    user = update.effective_user
-    if user.id not in ADMIN_IDS:
-        await update.message.reply_text("❌ This command is for administrators only.")
-        return
-    
-    stats_text = (
-        f"🤖 <b>Bot Statistics</b>\n\n"
-        f"• Total tracked articles: {len(SEEN_LINKS)}\n"
-        f"• RSS Feed: {RSS_URL}\n"
-        f"• Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"• Active users: 1 (basic implementation)"
-    )
-    
-    await update.message.reply_html(stats_text)
-    logger.info(f"Admin {user.id} requested stats")
+    try:
+        user = update.effective_user
+        if user.id not in ADMIN_IDS:
+            await update.message.reply_text("❌ This command is for administrators only.")
+            return
+        
+        stats_text = (
+            f"🤖 <b>Bot Statistics</b>\n\n"
+            f"• Total tracked articles: {len(SEEN_LINKS)}\n"
+            f"• RSS Feed: {RSS_URL}\n"
+            f"• Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"• Active users: 1 (basic implementation)"
+        )
+        
+        await update.message.reply_html(stats_text)
+        logger.info(f"Admin {user.id} requested stats")
+    except Exception as e:
+        logger.error(f"Error in stats command: {e}")
+        await update.message.reply_text("❌ Error retrieving statistics.")
 
 def main() -> None:
     """Start the bot."""
@@ -259,27 +297,31 @@ def main() -> None:
         print("❌ FATAL ERROR: Please set your BOT_TOKEN in config.py or .env file")
         return
 
-    # Create the Application
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("latest", get_latest_news))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-
-    # Start the bot
-    logger.info("Bot is starting...")
-    print("🤖 Bot is starting. Press Ctrl-C to stop.")
-    
     try:
+        # Create the Application
+        application = Application.builder().token(BOT_TOKEN).build()
+
+        # Add command handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("latest", get_latest_news))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("stats", stats_command))
+
+        # Register error handler
+        application.add_error_handler(error_handler)
+
+        # Start the bot
+        logger.info("Bot is starting...")
+        print("🤖 Bot is starting. Press Ctrl-C to stop.")
+        
         application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
         print("\n👋 Bot stopped.")
     except Exception as e:
-        logger.error(f"Bot crashed: {e}")
-        print(f"❌ Bot crashed: {e}")
+        logger.error(f"Bot failed to start: {e}")
+        print(f"❌ Bot failed to start: {e}")
 
 if __name__ == "__main__":
     main()
