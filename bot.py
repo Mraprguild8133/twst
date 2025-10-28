@@ -15,13 +15,14 @@ from datetime import datetime
 from telegram import Update, constants
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Import configuration
-from config import config
+# Import configuration - FIXED IMPORT
+import config
 
 # Use configuration values
 BOT_TOKEN = config.BOT_TOKEN
 RSS_URL = config.RSS_URL
 SEEN_LINKS_FILE = config.SEEN_LINKS_FILE
+ADMIN_IDS = config.ADMIN_IDS
 
 # Ensure directories exist
 os.makedirs("data", exist_ok=True)
@@ -74,14 +75,20 @@ def extract_image_url(entry):
     # 1. Check for media_content (common for featured images)
     if 'media_content' in entry and entry.media_content:
         for media in entry.media_content:
-            if 'url' in media:
+            if hasattr(media, 'get') and media.get('url'):
                 return media['url']
+            elif hasattr(media, 'url'):
+                return media.url
     
     # 2. Check for enclosures (often used for podcasts/media, but sometimes images)
     if 'enclosures' in entry and entry.enclosures:
         for enclosure in entry.enclosures:
-            if enclosure.get('type', '').startswith('image/') and 'href' in enclosure:
-                return enclosure['href']
+            enclosure_type = enclosure.get('type', '') if hasattr(enclosure, 'get') else getattr(enclosure, 'type', '')
+            if enclosure_type.startswith('image/'):
+                if hasattr(enclosure, 'get') and enclosure.get('href'):
+                    return enclosure['href']
+                elif hasattr(enclosure, 'href'):
+                    return enclosure.href
 
     # 3. Fallback: Search the summary/description HTML for an <img> tag
     summary_text = entry.get('summary', '') or entry.get('description', '')
@@ -120,7 +127,6 @@ def format_news_message(entry):
     if hasattr(entry, 'published_parsed') and entry.published_parsed:
         try:
             from time import mktime
-            from datetime import datetime
             dt = datetime.fromtimestamp(mktime(entry.published_parsed))
             published = f"📅 {dt.strftime('%Y-%m-%d %H:%M')}\n\n"
         except:
@@ -230,7 +236,7 @@ async def get_latest_news(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show bot statistics (admin only)."""
     user = update.effective_user
-    if user.id not in config.ADMIN_IDS:
+    if user.id not in ADMIN_IDS:
         await update.message.reply_text("❌ This command is for administrators only.")
         return
     
