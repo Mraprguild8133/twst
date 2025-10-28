@@ -2,22 +2,45 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv()  # Load environment variables from .env file
 
 # Bot Configuration
-BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN_HERE')
-
-# Chat IDs
-SOURCE_CHAT_ID = int(os.getenv('SOURCE_CHAT_ID', -1001234567890))
-DESTINATION_CHAT_ID = int(os.getenv('DESTINATION_CHAT_ID', -1009876543210))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+RSS_URL = os.getenv("RSS_URL", "https://www.gadgets360.com/rss/news")
 
 # Bot Settings
-ADMIN_USER_ID = os.getenv('ADMIN_USER_ID', '')
-POLLING_TIMEOUT = int(os.getenv('POLLING_TIMEOUT', 10))
-LONG_POLLING_TIMEOUT = int(os.getenv('LONG_POLLING_TIMEOUT', 5))
+ADMIN_IDS = [123456789]  # Replace with your Telegram user ID
+UPDATE_INTERVAL = 300  # 5 minutes for automatic updates
 
-# Content types to forward
-FORWARD_CONTENT_TYPES = [
-    'text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker',
-    'animation', 'poll', 'location', 'contact', 'dice', 'video_note'
-]
+# File paths
+SEEN_LINKS_FILE = "data/seen_links.json"
+LOG_FILE = "logs/bot.log"
+
+# Message templates
+WELCOME_MESSAGE = """
+Hello {user_name}! 👋
+
+I am an RSS bot tracking the latest news from Gadgets 360.
+
+<b>Commands:</b>
+/start - Show this welcome message
+/latest - Get the latest news article
+/help - Show help information
+
+Stay updated with the latest technology news!
+"""
+
+HELP_MESSAGE = """
+📚 <b>Available Commands:</b>
+
+/start - Show welcome message
+/latest - Get the latest news article from Gadgets 360
+/help - Show this help message
+
+<b>About this bot:</b>
+• Fetches real-time news from Gadgets 360 RSS feed
+• Shows article summaries with images when available
+• Provides direct links to full articles
+
+<b>Source:</b> Gadgets 360 News RSS Feed
+"""
