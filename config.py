@@ -19,7 +19,7 @@ class Config:
     WASABI_REGION = os.getenv("WASABI_REGION", "us-east-1")
     
     # Payment Configuration
-    MERCHANT_UPI_ID = os.getenv("MERCHANT_UPI_ID", "")
+    MERCHANT_UPI_ID = os.getenv("MERCHANT_UPI_ID", "mraprguild@upiid")
     MERCHANT_NAME = os.getenv("MERCHANT_NAME", "Cloud Storage Pro")
     ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "123456789"))
     
