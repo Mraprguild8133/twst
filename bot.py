@@ -5,6 +5,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.enums import ParseMode
 import logging
+import urllib.parse
 
 from config import Config
 from wasabi_client import WasabiClient
@@ -23,6 +24,38 @@ app = Client(
 )
 
 wasabi_client = WasabiClient()
+
+def is_valid_url(url):
+    """Check if URL is valid for Telegram buttons"""
+    try:
+        result = urllib.parse.urlparse(url)
+        return all([result.scheme, result.netloc])
+    except:
+        return False
+
+def create_safe_keyboard(direct_url, filename):
+    """Create keyboard with safe URL validation"""
+    buttons = []
+    
+    # Direct Link button (always safe)
+    if is_valid_url(direct_url):
+        buttons.append([InlineKeyboardButton("🌐 Direct Link", url=direct_url)])
+    
+    # MX Player button - use intent only for Android
+    mx_player_url = f"https://mxplayer.app/invoke?src={urllib.parse.quote(direct_url)}"
+    if is_valid_url(mx_player_url):
+        buttons.append([InlineKeyboardButton("📱 MX Player", url=mx_player_url)])
+    
+    # VLC Player button - use web interface
+    vlc_url = f"vlc://{direct_url}"  # This might not work in all clients
+    vlc_web_url = f"https://www.videolan.org/vlc.html?src={urllib.parse.quote(direct_url)}"
+    if is_valid_url(vlc_web_url):
+        buttons.append([InlineKeyboardButton("▶️ VLC Player", url=vlc_web_url)])
+    
+    # Share button (text only, no URL)
+    buttons.append([InlineKeyboardButton("🔄 Share File", switch_inline_query=filename)])
+    
+    return InlineKeyboardMarkup(buttons)
 
 # Start command
 @app.on_message(filters.command("start"))
@@ -84,7 +117,7 @@ async def download_command(client, message: Message):
         )
         return
     
-    filename = message.command[1]
+    filename = ' '.join(message.command[1:])
     await handle_download(message, filename)
 
 # Status command
@@ -101,8 +134,38 @@ async def status_command(client, message: Message):
     """
     await message.reply_text(status_text)
 
+# Help command
+@app.on_message(filters.command("help"))
+async def help_command(client, message: Message):
+    help_text = """
+🆘 **Bot Help Guide**
+
+**Available Commands:**
+/start - Start the bot
+/upload - Upload files to cloud storage  
+/download - Download files from storage
+/status - Check bot status
+/help - This help message
+
+**Upload Process:**
+1. Use /upload command or send any file directly
+2. Wait for upload to complete
+3. Get streaming links for various players
+
+**Download Process:**
+1. Use /download filename.ext
+2. File will be sent to you directly
+
+**Supported File Types:**
+• Videos (MP4, MKV, AVI, MOV)
+• Audio (MP3, M4A, FLAC) 
+• Documents (PDF, DOC, TXT)
+• All other file types
+    """
+    await message.reply_text(help_text)
+
 # Handle file uploads
-@app.on_message(filters.document | filters.video | filters.audio)
+@app.on_message(filters.document | filters.video | filters.audio | filters.photo)
 async def handle_file_upload(client, message: Message):
     if message.from_user.id not in Config.ADMIN_IDS:
         await message.reply_text("❌ Access denied. Admin only.")
@@ -118,11 +181,16 @@ async def handle_file_upload(client, message: Message):
     elif message.audio:
         file = message.audio
         file_type = "audio"
+    elif message.photo:
+        file = message.photo
+        file_type = "photo"
+        # For photos, we need to get the largest size
+        file = file.file_id
     else:
         return
     
     # Check file size
-    if file.file_size > Config.MAX_FILE_SIZE:
+    if hasattr(file, 'file_size') and file.file_size > Config.MAX_FILE_SIZE:
         await message.reply_text(f"❌ File too large! Max size is 5GB.")
         return
     
@@ -131,79 +199,89 @@ async def handle_file_upload(client, message: Message):
     
     try:
         # Download file locally first
-        file_name = file.file_name or f"{file_type}_{file.file_id}"
-        download_path = f"downloads/{file.file_id}_{file_name}"
+        if file_type == "photo":
+            file_name = f"photo_{message.id}.jpg"
+            download_path = f"downloads/{file_name}"
+            # For photos, use different download method
+            file_size = None
+        else:
+            file_name = getattr(file, 'file_name', f"{file_type}_{file.file_id}")
+            download_path = f"downloads/{file.file_id}_{file_name}"
+            file_size = file.file_size
         
         # Create downloads directory
         os.makedirs("downloads", exist_ok=True)
         
-        # Initialize progress tracking
-        progress = Progress(client, status_msg, file_type)
-        progress.set_total_size(file.file_size)
-        
         # Download file from Telegram
-        await message.download(
-            file_name=download_path,
-            progress=progress.progress_callback,
-            progress_args=(progress,)
-        )
+        if file_type == "photo":
+            await client.download_media(message, file_name=download_path)
+            file_size = os.path.getsize(download_path)
+        else:
+            # Initialize progress tracking
+            progress = Progress(client, status_msg, file_type)
+            progress.set_total_size(file_size)
+            
+            await message.download(
+                file_name=download_path,
+                progress=progress.progress_callback,
+                progress_args=(progress,)
+            )
         
         # Upload to Wasabi
         await status_msg.edit_text("☁️ Uploading to Wasabi storage...")
         
-        wasabi_progress = Progress(client, status_msg, file_type)
-        wasabi_progress.set_total_size(file.file_size)
+        # Upload to Wasabi (without progress for simplicity)
+        wasabi_url = await wasabi_client.upload_file(download_path, file_name)
         
-        # Upload to Wasabi
-        wasabi_url = await wasabi_client.upload_file(
-            download_path,
-            file_name,
-            progress_callback=wasabi_progress.progress_callback
-        )
-        
-        # Generate streaming links
-        streaming_links = generate_streaming_links(wasabi_url, file_name)
+        # Generate safe keyboard
+        keyboard = create_safe_keyboard(wasabi_url, file_name)
         
         # Send success message with links
         success_text = f"""
 ✅ **Upload Successful!**
 
 📁 **File:** `{file_name}`
-💾 **Size:** {format_size(file.file_size)}
-🔗 **Direct URL:** {wasabi_url}
+💾 **Size:** {format_size(file_size)}
+🔗 **Direct URL:** [Click Here]({wasabi_url})
 
-**🎬 Streaming Links:**
-{streaming_links}
+**🎬 Streaming Instructions:**
+• **MX Player:** Copy the Direct Link and paste in MX Player
+• **VLC:** Use "Open Network Stream" and paste the URL
+• **Any Player:** Use the direct URL for streaming
 
-**📱 Supported Players:**
-• MX Player: Copy direct URL
-• VLC: Open network stream
-• PotPlayer: Open URL
-• Any modern media player
+**📱 Direct Link:**
+`{wasabi_url}`
         """
         
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🌐 Direct Link", url=wasabi_url)],
-            [InlineKeyboardButton("📱 MX Player", url=f"intent:{wasabi_url}#Intent;package=com.mxtech.videoplayer.ad;end")],
-            [InlineKeyboardButton("▶️ VLC", url=f"vlc://{wasabi_url}")],
-            [InlineKeyboardButton("🔄 Share", switch_inline_query=file_name)]
-        ])
-        
-        await status_msg.edit_text(success_text, reply_markup=keyboard)
+        await status_msg.edit_text(
+            success_text, 
+            reply_markup=keyboard,
+            disable_web_page_preview=True
+        )
         
         # Clean up local file
         try:
             os.remove(download_path)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Could not remove local file: {e}")
             
     except Exception as e:
         logger.error(f"Upload error: {e}")
-        await status_msg.edit_text(f"❌ Upload failed: {str(e)}")
+        error_msg = f"❌ Upload failed: {str(e)}"
+        if "BUTTON_URL_INVALID" in str(e):
+            error_msg += "\n\n⚠️ URL validation error. Sending without buttons..."
+            # Try sending without keyboard
+            try:
+                await status_msg.edit_text(error_msg)
+            except:
+                await message.reply_text(error_msg)
+        else:
+            await status_msg.edit_text(error_msg)
         
         # Clean up on error
         try:
-            os.remove(download_path)
+            if 'download_path' in locals():
+                os.remove(download_path)
         except:
             pass
 
@@ -223,27 +301,41 @@ async def handle_download(message: Message, filename: str):
         
         await status_msg.edit_text("📥 Downloading from Wasabi...")
         
-        # Download file (progress would be implemented similarly to upload)
+        # Download file
         local_path = await wasabi_client.download_file(filename, download_path)
         
         # Send file to user
         await status_msg.edit_text("📤 Sending file...")
         
         # Determine file type for sending
-        if filename.lower().endswith(('.mp4', '.mkv', '.avi', '.mov')):
-            await message.reply_video(local_path, caption=f"📥 {filename}")
-        elif filename.lower().endswith(('.mp3', '.m4a', '.flac', '.wav')):
-            await message.reply_audio(local_path, caption=f"🎵 {filename}")
+        if filename.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm')):
+            await message.reply_video(
+                local_path, 
+                caption=f"🎥 **{filename}**\n\n✅ Downloaded from cloud storage"
+            )
+        elif filename.lower().endswith(('.mp3', '.m4a', '.flac', '.wav', '.ogg')):
+            await message.reply_audio(
+                local_path, 
+                caption=f"🎵 **{filename}**\n\n✅ Downloaded from cloud storage"
+            )
+        elif filename.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp')):
+            await message.reply_photo(
+                local_path,
+                caption=f"🖼️ **{filename}**\n\n✅ Downloaded from cloud storage"
+            )
         else:
-            await message.reply_document(local_path, caption=f"📄 {filename}")
+            await message.reply_document(
+                local_path, 
+                caption=f"📄 **{filename}**\n\n✅ Downloaded from cloud storage"
+            )
         
         await status_msg.delete()
         
         # Clean up
         try:
             os.remove(local_path)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Could not remove downloaded file: {e}")
             
     except Exception as e:
         logger.error(f"Download error: {e}")
@@ -257,7 +349,7 @@ async def handle_callbacks(client, callback_query):
     if data == "upload_help":
         await callback_query.message.edit_text(
             "📤 **How to Upload:**\n\n"
-            "1. Send any file (document, video, audio)\n"
+            "1. Send any file (document, video, audio, photo)\n"
             "2. Wait for upload to complete\n"
             "3. Get direct streaming links\n"
             "4. Use with MX Player, VLC, etc.\n\n"
@@ -282,45 +374,33 @@ async def handle_callbacks(client, callback_query):
     elif data == "players_info":
         await callback_query.message.edit_text(
             "🎬 **Supported Players:**\n\n"
-            "• **MX Player** - Direct URL support\n"
-            "• **VLC Media Player** - Network stream\n"
-            "• **PotPlayer** - URL playback\n"
-            "• **KM Player** - Stream support\n"
+            "• **MX Player** - Copy direct URL and paste\n"
+            "• **VLC Media Player** - Use 'Open Network Stream'\n" 
+            "• **PotPlayer** - Open URL feature\n"
+            "• **KM Player** - Network stream support\n"
             "• **All modern media players**\n\n"
-            "Just copy the direct link and paste in your player!",
+            "**Instructions:** Copy the direct link and paste in your player's URL/network stream feature!",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")]
             ])
         )
     
     elif data == "back_to_start":
+        # Delete current message and send new start message
+        await callback_query.message.delete()
         await start_command(client, callback_query.message)
 
 # Utility functions
 def format_size(size_bytes):
     """Format file size in human readable format"""
+    if size_bytes is None:
+        return "Unknown size"
+    
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size_bytes < 1024.0:
             return f"{size_bytes:.2f} {unit}"
         size_bytes /= 1024.0
     return f"{size_bytes:.2f} TB"
-
-def generate_streaming_links(direct_url, filename):
-    """Generate streaming links for different players"""
-    links = []
-    
-    # MX Player intent
-    mx_player_link = f"intent:{direct_url}#Intent;package=com.mxtech.videoplayer.ad;end"
-    links.append(f"• **MX Player:** `{mx_player_link}`")
-    
-    # VLC protocol
-    vlc_link = f"vlc://{direct_url}"
-    links.append(f"• **VLC Player:** `{vlc_link}`")
-    
-    # Direct URL (for any player)
-    links.append(f"• **Direct URL:** `{direct_url}`")
-    
-    return "\n".join(links)
 
 if __name__ == "__main__":
     print("🤖 Starting Telegram Wasabi Bot...")
