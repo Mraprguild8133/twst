@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Media Player - Cloud Storage Bot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            color: white;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .player-container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+            max-width: 900px;
+            width: 100%;
+            backdrop-filter: blur(10px);
+        }
+
+        .media-player {
+            width: 100%;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        video, audio {
+            width: 100%;
+            outline: none;
+        }
+
+        img {
+            width: 100%;
+            max-height: 70vh;
+            object-fit: contain;
+            border-radius: 15px;
+        }
+
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 12px 25px;
+            border: none;
+            border-radius: 50px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+        }
+
+        .btn-download {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-back {
+            background: rgba(102, 126, 234, 0.1);
+            color: #667eea;
+            border: 2px solid #667eea;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        .file-info {
+            background: rgba(102, 126, 234, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        .file-info p {
+            color: #555;
+            margin: 5px 0;
+        }
+
+        .expiry-notice {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+            text-align: center;
+            font-size: 0.9rem;
+        }
+
+        .unsupported-message {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .unsupported-message i {
+            font-size: 4rem;
+            margin-bottom: 20px;
+            display: block;
+        }
+
+        @media (max-width: 768px) {
+            .player-container {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .controls {
+                flex-direction: column;
+            }
+            
+            .btn {
+                width: 100%;
+                justify-content: center;
+            }
+        }
+
+        /* Custom video player styles */
+        video::-webkit-media-controls-panel {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        video::-webkit-media-controls-play-button,
+        video::-webkit-media-controls-volume-slider,
+        video::-webkit-media-controls-timeline {
+            filter: invert(1);
+        }
+
+        /* Loading animation */
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 200px;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎬 Media Player</h1>
+        <p>Cloud Storage Bot - Stream your files securely</p>
+    </div>
+
+    <div class="player-container">
+        {% if media_type == 'video' %}
+            <div class="media-player">
+                <video id="videoPlayer" controls autoplay>
+                    <source src="{{ media_url }}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+        {% elif media_type == 'audio' %}
+            <div class="media-player">
+                <audio id="audioPlayer" controls autoplay>
+                    <source src="{{ media_url }}" type="audio/mpeg">
+                    Your browser does not support the audio tag.
+                </audio>
+            </div>
+        {% elif media_type == 'image' %}
+            <div class="media-player">
+                <img src="{{ media_url }}" alt="Image" id="imageViewer" onload="hideLoading()">
+                <div id="loading" class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        {% else %}
+            <div class="unsupported-message">
+                <i>❌</i>
+                <h2>Unsupported File Type</h2>
+                <p>This file type cannot be played in the web player.</p>
+                <p>Please use the download button to access the file.</p>
+            </div>
+        {% endif %}
+
+        {% if media_type in ['video', 'audio', 'image'] %}
+            <div class="file-info">
+                <p><strong>File Type:</strong> {{ media_type|title }}</p>
+                <p><strong>Streaming:</strong> Secure cloud streaming</p>
+            </div>
+
+            <div class="expiry-notice">
+                ⏰ This link will expire in 24 hours. Download the file to keep it permanently.
+            </div>
+
+            <div class="controls">
+                <a href="{{ media_url }}" class="btn btn-download" download>
+                    <i>📥</i>
+                    Download File
+                </a>
+                <a href="/" class="btn btn-back">
+                    <i>🏠</i>
+                    Back to Home
+                </a>
+            </div>
+        {% endif %}
+    </div>
+
+    <script>
+        function hideLoading() {
+            const loading = document.getElementById('loading');
+            if (loading) {
+                loading.style.display = 'none';
+            }
+        }
+
+        // Auto-hide loading for non-image types
+        document.addEventListener('DOMContentLoaded', function() {
+            const mediaType = '{{ media_type }}';
+            if (mediaType !== 'image') {
+                hideLoading();
+            }
+
+            // Add event listeners for media players
+            const videoPlayer = document.getElementById('videoPlayer');
+            const audioPlayer = document.getElementById('audioPlayer');
+
+            if (videoPlayer) {
+                videoPlayer.addEventListener('loadeddata', function() {
+                    console.log('Video loaded successfully');
+                });
+
+                videoPlayer.addEventListener('error', function() {
+                    console.error('Error loading video');
+                    alert('Error loading video. Please try downloading the file instead.');
+                });
+            }
+
+            if (audioPlayer) {
+                audioPlayer.addEventListener('loadeddata', function() {
+                    console.log('Audio loaded successfully');
+                });
+
+                audioPlayer.addEventListener('error', function() {
+                    console.error('Error loading audio');
+                    alert('Error loading audio. Please try downloading the file instead.');
+                });
+            }
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                if (e.key === ' ') {
+                    // Space bar to play/pause video
+                    if (videoPlayer) {
+                        e.preventDefault();
+                        if (videoPlayer.paused) {
+                            videoPlayer.play();
+                        } else {
+                            videoPlayer.pause();
+                        }
+                    }
+                } else if (e.key === 'Escape') {
+                    // Escape to go back
+                    window.location.href = '/';
+                } else if (e.key === 'f' || e.key === 'F') {
+                    // F for fullscreen (video only)
+                    if (videoPlayer && document.fullscreenEnabled) {
+                        e.preventDefault();
+                        if (!document.fullscreenElement) {
+                            videoPlayer.requestFullscreen().catch(err => {
+                                console.log('Error attempting to enable fullscreen:', err);
+                            });
+                        } else {
+                            document.exitFullscreen();
+                        }
+                    }
+                }
+            });
+        });
+
+        // Handle page visibility changes
+        document.addEventListener('visibilitychange', function() {
+            const videoPlayer = document.getElementById('videoPlayer');
+            const audioPlayer = document.getElementById('audioPlayer');
+            
+            if (document.hidden) {
+                // Page is hidden, pause media
+                if (videoPlayer && !videoPlayer.paused) {
+                    videoPlayer.pause();
+                }
+                if (audioPlayer && !audioPlayer.paused) {
+                    audioPlayer.pause();
+                }
+            }
+        });
+    </script>
+</body>
+</html>
