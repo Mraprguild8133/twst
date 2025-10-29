@@ -12,7 +12,7 @@ from config import config
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, RPCError
 
 # External storage client
 import boto3
@@ -46,9 +46,29 @@ app = Client(
     api_id=config.API_ID,
     api_hash=config.API_HASH,
     bot_token=config.BOT_TOKEN,
-    max_concurrent_transfers=5,
-    workers=30
+    workers=20,  # Reduced workers for better stability
+    sleep_threshold=60
 )
+
+# --- Utility Functions ---
+def human_readable_size(size: float) -> str:
+    """Convert bytes to human-readable format."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024.0:
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} PB"
+
+def format_time(seconds: float) -> str:
+    """Format seconds into human-readable time."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+    else:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours}h {minutes}m"
 
 # --- Progress Callback Class ---
 class ProgressCallback:
@@ -85,17 +105,17 @@ class ProgressCallback:
             percent = min(100, round(self.uploaded_bytes * 100 / self.total_size))
             
             # Convert bytes to human-readable format
-            human_uploaded = self.human_readable_size(self.uploaded_bytes)
-            human_total = self.human_readable_size(self.total_size)
+            human_uploaded = human_readable_size(self.uploaded_bytes)
+            human_total = human_readable_size(self.total_size)
             
             # Calculate speed and ETA
             elapsed_time = time.time() - self.start_time
             if elapsed_time > 0:
                 speed = self.uploaded_bytes / elapsed_time
-                human_speed = self.human_readable_size(speed) + "/s"
+                human_speed = human_readable_size(speed) + "/s"
                 remaining_bytes = self.total_size - self.uploaded_bytes
                 eta_seconds = remaining_bytes / speed if speed > 0 else 0
-                eta = self.format_time(eta_seconds)
+                eta = format_time(eta_seconds)
             else:
                 human_speed = "0 B/s"
                 eta = "N/A"
@@ -126,28 +146,8 @@ class ProgressCallback:
         """Boto3 calls this synchronous method."""
         self.uploaded_bytes += bytes_amount
         # Schedule async update
-        asyncio.create_task(self._edit_message())
-
-    @staticmethod
-    def human_readable_size(size: float) -> str:
-        """Convert bytes to human-readable format."""
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size < 1024.0:
-                return f"{size:.2f} {unit}"
-            size /= 1024.0
-        return f"{size:.2f} PB"
-
-    @staticmethod
-    def format_time(seconds: float) -> str:
-        """Format seconds into human-readable time."""
-        if seconds < 60:
-            return f"{int(seconds)}s"
-        elif seconds < 3600:
-            return f"{int(seconds // 60)}m {int(seconds % 60)}s"
-        else:
-            hours = int(seconds // 3600)
-            minutes = int((seconds % 3600) // 60)
-            return f"{hours}h {minutes}m"
+        if asyncio.get_event_loop().is_running():
+            asyncio.create_task(self._edit_message())
 
 # --- Helper Functions ---
 async def log_to_channel(text: str):
@@ -199,147 +199,195 @@ async def stats_command(client: Client, message: Message):
     )
     await message.reply_text(stats_text)
 
+@app.on_message(filters.command("help"))
+async def help_command(client: Client, message: Message):
+    """Show help message."""
+    help_text = (
+        "📖 **Bot Help**\n\n"
+        "**How to use:**\n"
+        "1. Send me any file (document, video, audio, photo)\n"
+        "2. I'll download and upload it to Wasabi storage\n"
+        "3. You'll receive a streaming link that works with MX Player, VLC, etc.\n\n"
+        "**Features:**\n"
+        "• Files up to 5GB\n"
+        "• Fast downloads & uploads\n"
+        "• 7-day streaming links\n"
+        "• Progress tracking\n\n"
+        "**Commands:**\n"
+        "/start - Start the bot\n"
+        "/help - Show this help\n"
+        "/stats - Bot statistics (admin only)"
+    )
+    await message.reply_text(help_text)
+
 # --- File Handler ---
 @app.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
 async def file_handler(client: Client, message: Message):
     """Handle incoming file messages."""
-    # Determine file type and get file info
-    if message.document:
-        file_info = message.document
-    elif message.video:
-        file_info = message.video
-    elif message.audio:
-        file_info = message.audio
-    elif message.photo:
-        file_info = message.photo
-        # For photos, we need to handle differently
-        file_size = file_info.file_size
-        file_name = f"photo_{file_info.file_unique_id}.jpg"
-    else:
-        await message.reply_text("❌ Unsupported file type.")
-        return
-
-    # Get file name and size for non-photo files
-    if not message.photo:
-        file_name = getattr(file_info, "file_name", 
-                           f"{file_info.file_unique_id}.{file_info.mime_type.split('/')[-1] if file_info.mime_type else 'dat'}")
-        file_size = file_info.file_size
-
-    # Check file size
-    if file_size > config.MAX_FILE_SIZE:
-        await message.reply_text(f"❌ File too large. Maximum size is 5GB.")
-        return
-
-    # Create paths
-    os.makedirs(config.DOWNLOAD_PATH, exist_ok=True)
-    temp_file_path = os.path.join(config.DOWNLOAD_PATH, f"{file_info.file_unique_id}_{file_name}")
-    
-    # Create unique Wasabi key
-    wasabi_object_key = (
-        f"{message.from_user.id}/"
-        f"{datetime.now().strftime('%Y%m%d%H%M%S')}_"
-        f"{file_info.file_unique_id}_{file_name}"
-    )
-
-    LOGGER.info(f"Processing file: {file_name} ({file_size} bytes)")
-
-    # Initial status message
-    status_msg = await message.reply_text(f"📥 Starting download of `{file_name}`...")
-    start_time = time.time()
-
-    # Download file
     try:
-        progress_cb = ProgressCallback(status_msg, file_name, start_time, "Downloading")
+        # Determine file type and get file info
+        if message.document:
+            file_info = message.document
+            file_name = getattr(file_info, "file_name", f"document_{file_info.file_unique_id}.dat")
+            file_size = file_info.file_size
+        elif message.video:
+            file_info = message.video
+            file_name = getattr(file_info, "file_name", f"video_{file_info.file_unique_id}.mp4")
+            file_size = file_info.file_size
+        elif message.audio:
+            file_info = message.audio
+            file_name = getattr(file_info, "file_name", f"audio_{file_info.file_unique_id}.mp3")
+            file_size = file_info.file_size
+        elif message.photo:
+            file_info = message.photo
+            file_size = file_info.file_size
+            file_name = f"photo_{file_info.file_unique_id}.jpg"
+        else:
+            await message.reply_text("❌ Unsupported file type.")
+            return
+
+        # Check file size
+        if file_size > config.MAX_FILE_SIZE:
+            await message.reply_text(f"❌ File too large. Maximum size is 5GB.")
+            return
+
+        # Create paths
+        os.makedirs(config.DOWNLOAD_PATH, exist_ok=True)
+        temp_file_path = os.path.join(config.DOWNLOAD_PATH, f"{file_info.file_unique_id}_{file_name}")
         
-        downloaded_path = await client.download_media(
-            message,
-            file_name=temp_file_path,
-            progress=progress_cb,
-            progress_args=(file_size,),
+        # Create unique Wasabi key
+        wasabi_object_key = (
+            f"{message.from_user.id}/"
+            f"{datetime.now().strftime('%Y%m%d%H%M%S')}_"
+            f"{file_info.file_unique_id}_{file_name}"
         )
-        
-        await status_msg.edit_text("✅ Download complete. Starting upload to Wasabi...")
-        upload_start_time = time.time()
+
+        LOGGER.info(f"Processing file: {file_name} ({file_size} bytes)")
+
+        # Initial status message
+        status_msg = await message.reply_text(f"📥 Starting download of `{file_name}`...")
+        start_time = time.time()
+
+        # Download file
+        try:
+            progress_cb = ProgressCallback(status_msg, file_name, start_time, "Downloading")
+            
+            downloaded_path = await client.download_media(
+                message,
+                file_name=temp_file_path,
+                progress=progress_cb,
+                progress_args=(file_size,),
+            )
+            
+            if not downloaded_path or not os.path.exists(downloaded_path):
+                await status_msg.edit_text("❌ Download failed: File not found.")
+                return
+                
+            await status_msg.edit_text("✅ Download complete. Starting upload to Wasabi...")
+            upload_start_time = time.time()
+
+        except Exception as e:
+            await status_msg.edit_text(f"❌ **Download Failed:** {str(e)}")
+            LOGGER.error(f"Download error for {file_name}: {e}")
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+            return
+
+        # Upload to Wasabi
+        def sync_upload():
+            try:
+                WASABI_CLIENT.upload_file(
+                    Filename=downloaded_path,
+                    Bucket=config.WASABI_BUCKET,
+                    Key=wasabi_object_key,
+                    Callback=ProgressCallback(status_msg, file_name, upload_start_time, "Uploading").sync_callback if file_size > 0 else None,
+                )
+                return True, None
+            except Exception as e:
+                return False, str(e)
+
+        try:
+            loop = asyncio.get_event_loop()
+            upload_success, upload_error = await loop.run_in_executor(None, sync_upload)
+
+            if upload_success:
+                streaming_link = generate_streaming_link(wasabi_object_key)
+                
+                if streaming_link:
+                    await log_to_channel(
+                        f"✅ <b>File Uploaded:</b> "
+                        f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>\n"
+                        f"<b>File:</b> <code>{file_name}</code>\n"
+                        f"<b>Size:</b> {human_readable_size(file_size)}"
+                    )
+
+                    final_text = (
+                        f"✅ **Upload Complete!**\n\n"
+                        f"**File:** `{file_name}`\n"
+                        f"**Size:** {human_readable_size(file_size)}\n\n"
+                        f"🔗 **Streaming Link:**\n"
+                        f"`{streaming_link}`\n\n"
+                        f"This link expires in 7 days and supports direct streaming."
+                    )
+                    
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📱 Open Link", url=streaming_link)],
+                        [InlineKeyboardButton("🔗 Copy Link", callback_data=f"copy_{streaming_link}")]
+                    ])
+                    
+                    await status_msg.edit_text(final_text, reply_markup=keyboard, disable_web_page_preview=True)
+                else:
+                    await status_msg.edit_text("❌ Upload failed: Could not generate streaming link.")
+            else:
+                await status_msg.edit_text(f"❌ Upload failed: {upload_error}")
+
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Upload failed: {str(e)}")
+            LOGGER.error(f"Upload error: {e}")
+
+        finally:
+            # Cleanup
+            if os.path.exists(downloaded_path):
+                try:
+                    os.remove(downloaded_path)
+                    LOGGER.info(f"Cleaned up local file: {downloaded_path}")
+                except Exception as e:
+                    LOGGER.error(f"Error cleaning up file {downloaded_path}: {e}")
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ **Download Failed:** {str(e)}")
-        LOGGER.error(f"Download error for {file_name}: {e}")
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-        return
-
-    # Upload to Wasabi
-    def sync_upload():
-        try:
-            WASABI_CLIENT.upload_file(
-                Filename=downloaded_path,
-                Bucket=config.WASABI_BUCKET,
-                Key=wasabi_object_key,
-                Callback=ProgressCallback(status_msg, file_name, upload_start_time, "Uploading").sync_callback if file_size > 0 else None,
-            )
-            return True
-        except Exception as e:
-            LOGGER.error(f"Upload error for {wasabi_object_key}: {e}")
-            return False
-
-    try:
-        loop = asyncio.get_event_loop()
-        upload_success = await loop.run_in_executor(None, sync_upload)
-
-        if upload_success:
-            streaming_link = generate_streaming_link(wasabi_object_key)
-            
-            if streaming_link:
-                await log_to_channel(
-                    f"✅ <b>File Uploaded:</b> "
-                    f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>\n"
-                    f"<b>File:</b> <code>{file_name}</code>\n"
-                    f"<b>Size:</b> {ProgressCallback.human_readable_size(file_size)}"
-                )
-
-                final_text = (
-                    f"✅ **Upload Complete!**\n\n"
-                    f"**File:** `{file_name}`\n"
-                    f"**Size:** {ProgressCallback.human_readable_size(file_size)}\n\n"
-                    f"🔗 **Streaming Link:**\n"
-                    f"```\n{streaming_link}\n```\n\n"
-                    f"This link expires in 7 days and supports direct streaming."
-                )
-                
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📱 Open Link", url=streaming_link)],
-                    [InlineKeyboardButton("🔗 Copy Link", callback_data=f"copy_{streaming_link}")]
-                ])
-                
-                await status_msg.edit_text(final_text, reply_markup=keyboard, disable_web_page_preview=True)
-            else:
-                await status_msg.edit_text("❌ Upload failed: Could not generate streaming link.")
-        else:
-            await status_msg.edit_text("❌ Upload failed. Please try again later.")
-
-    finally:
-        # Cleanup
-        if os.path.exists(downloaded_path):
-            os.remove(downloaded_path)
-            LOGGER.info(f"Cleaned up local file: {downloaded_path}")
+        LOGGER.error(f"Unexpected error in file_handler: {e}")
+        await message.reply_text("❌ An unexpected error occurred. Please try again.")
 
 # --- Callback Handler for Copy Button ---
 @app.on_callback_query(filters.regex(r"^copy_"))
 async def copy_link_callback(client: Client, callback_query: CallbackQuery):
     """Handle copy link button clicks."""
     link = callback_query.data[5:]  # Remove "copy_" prefix
-    await callback_query.answer("Link copied to clipboard!", show_alert=True)
-    # Note: Telegram bots can't actually copy to clipboard, this is just visual feedback
+    await callback_query.answer("Link copied to clipboard! (Note: Use the text above to manually copy)", show_alert=True)
 
 # --- Main Execution ---
 async def main():
     """Main function to start the bot."""
     LOGGER.info("Starting Wasabi File Bot...")
-    await app.start()
-    LOGGER.info("Bot is running. Press Ctrl+C to stop.")
-    await idle()
-    LOGGER.info("Stopping bot...")
-    await app.stop()
+    
+    # Ensure download directory exists
+    os.makedirs(config.DOWNLOAD_PATH, exist_ok=True)
+    
+    try:
+        await app.start()
+        me = await app.get_me()
+        LOGGER.info(f"Bot started successfully: @{me.username}")
+        await log_to_channel(f"🤖 <b>Bot Started</b> - @{me.username}")
+        
+        LOGGER.info("Bot is running. Press Ctrl+C to stop.")
+        await idle()
+        
+    except Exception as e:
+        LOGGER.error(f"Failed to start bot: {e}")
+    finally:
+        LOGGER.info("Stopping bot...")
+        await app.stop()
+        LOGGER.info("Bot stopped successfully.")
 
 if __name__ == "__main__":
     try:
