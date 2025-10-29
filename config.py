@@ -59,7 +59,7 @@ class Config:
     PREMIUM_PLANS = {
         "basic": {
             "name": "Basic Plan",
-            "price": 299,  # ₹299
+            "price": 20,  # ₹299
             "storage_gb": 50,
             "max_file_size_gb": 4,
             "duration_days": 30,
@@ -72,7 +72,7 @@ class Config:
         },
         "pro": {
             "name": "Pro Plan", 
-            "price": 799,  # ₹799
+            "price": 40,  # ₹799
             "storage_gb": 200,
             "max_file_size_gb": 10,
             "duration_days": 30,
@@ -86,7 +86,7 @@ class Config:
         },
         "annual_pro": {
             "name": "Annual Pro",
-            "price": 7999,  # ₹7,999
+            "price": 240  # ₹7,999
             "storage_gb": 200,
             "max_file_size_gb": 10,
             "duration_days": 365,
@@ -96,7 +96,7 @@ class Config:
                 "24/7 Priority Support",
                 "No Ads", 
                 "Faster Processing",
-                "2 Months Free"
+                "1 Years Free"
             ]
         }
     }
