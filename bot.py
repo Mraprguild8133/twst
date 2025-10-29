@@ -10,7 +10,7 @@ from config import config
 
 # Mandatory imports for the core functionality
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
 
@@ -46,13 +46,16 @@ app = Client(
     api_id=config.API_ID,
     api_hash=config.API_HASH,
     bot_token=config.BOT_TOKEN,
-    workers=20,  # Reduced workers for better stability
+    workers=20,
     sleep_threshold=60
 )
 
 # --- Utility Functions ---
 def human_readable_size(size: float) -> str:
     """Convert bytes to human-readable format."""
+    if size == 0:
+        return "0 B"
+    
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if size < 1024.0:
             return f"{size:.2f} {unit}"
@@ -248,7 +251,12 @@ async def file_handler(client: Client, message: Message):
 
         # Check file size
         if file_size > config.MAX_FILE_SIZE:
-            await message.reply_text(f"❌ File too large. Maximum size is 5GB.")
+            await message.reply_text("❌ File too large. Maximum size is 5GB.")
+            return
+
+        # Check if file is empty
+        if file_size == 0:
+            await message.reply_text("❌ File is empty.")
             return
 
         # Create paths
@@ -281,6 +289,12 @@ async def file_handler(client: Client, message: Message):
             
             if not downloaded_path or not os.path.exists(downloaded_path):
                 await status_msg.edit_text("❌ Download failed: File not found.")
+                return
+                
+            # Verify file was actually downloaded
+            if os.path.getsize(downloaded_path) == 0:
+                await status_msg.edit_text("❌ Download failed: File is empty.")
+                os.remove(downloaded_path)
                 return
                 
             await status_msg.edit_text("✅ Download complete. Starting upload to Wasabi...")
@@ -327,12 +341,12 @@ async def file_handler(client: Client, message: Message):
                         f"**Size:** {human_readable_size(file_size)}\n\n"
                         f"🔗 **Streaming Link:**\n"
                         f"`{streaming_link}`\n\n"
-                        f"This link expires in 7 days and supports direct streaming."
+                        f"This link expires in 7 days and supports direct streaming in players like MX Player, VLC, etc."
                     )
                     
                     keyboard = InlineKeyboardMarkup([
                         [InlineKeyboardButton("📱 Open Link", url=streaming_link)],
-                        [InlineKeyboardButton("🔗 Copy Link", callback_data=f"copy_{streaming_link}")]
+                        [InlineKeyboardButton("📋 Copy Link", callback_data=f"copy_{streaming_link}")]
                     ])
                     
                     await status_msg.edit_text(final_text, reply_markup=keyboard, disable_web_page_preview=True)
@@ -363,7 +377,7 @@ async def file_handler(client: Client, message: Message):
 async def copy_link_callback(client: Client, callback_query: CallbackQuery):
     """Handle copy link button clicks."""
     link = callback_query.data[5:]  # Remove "copy_" prefix
-    await callback_query.answer("Link copied to clipboard! (Note: Use the text above to manually copy)", show_alert=True)
+    await callback_query.answer("📋 Link copied to clipboard! (Use the text above to manually copy)", show_alert=False)
 
 # --- Main Execution ---
 async def main():
