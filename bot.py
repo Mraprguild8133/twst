@@ -48,7 +48,7 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "123456789"))
 PREMIUM_PLANS = {
     "basic": {
         "name": "Basic Plan",
-        "price": 299,
+        "price": 20,
         "storage_gb": 50,
         "max_file_size_gb": 4,
         "duration_days": 30,
@@ -56,7 +56,7 @@ PREMIUM_PLANS = {
     },
     "pro": {
         "name": "Pro Plan", 
-        "price": 799,
+        "price": 40,
         "storage_gb": 200,
         "max_file_size_gb": 10,
         "duration_days": 30,
