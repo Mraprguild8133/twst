@@ -33,16 +33,13 @@ class WasabiStorage:
         self.bucket = config.WASABI_BUCKET
 
     async def upload_file(self, file_path: str, object_name: str) -> bool:
-        """Upload file to Wasabi with progress tracking"""
+        """Upload file to Wasabi"""
         try:
-            file_size = os.path.getsize(file_path)
-            
-            # Upload with progress (simplified for async)
-            self.s3_client.upload_file(
-                file_path,
-                self.bucket,
-                object_name,
-                Callback=ProgressPercentage(file_path, object_name)
+            # For async compatibility, we'll use threads
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, 
+                lambda: self.s3_client.upload_file(file_path, self.bucket, object_name)
             )
             return True
         except Exception as e:
@@ -52,10 +49,10 @@ class WasabiStorage:
     async def download_file(self, object_name: str, file_path: str) -> bool:
         """Download file from Wasabi"""
         try:
-            self.s3_client.download_file(
-                self.bucket,
-                object_name,
-                file_path
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: self.s3_client.download_file(self.bucket, object_name, file_path)
             )
             return True
         except Exception as e:
@@ -90,19 +87,6 @@ class WasabiStorage:
             logger.error(f"List files failed: {e}")
             return []
 
-class ProgressPercentage:
-    """Progress callback for S3 uploads/downloads"""
-    def __init__(self, filename, operation):
-        self._filename = filename
-        self._operation = operation
-        self._size = float(os.path.getsize(filename))
-        self._seen_so_far = 0
-
-    def __call__(self, bytes_amount):
-        self._seen_so_far += bytes_amount
-        percentage = (self._seen_so_far / self._size) * 100
-        logger.info(f"{self._operation} progress: {percentage:.2f}%")
-
 class TelegramBot:
     def __init__(self):
         self.app = Client(
@@ -128,6 +112,22 @@ class TelegramBot:
                 "/list - List stored files\n"
                 "/stream - Get streaming link\n"
                 "/help - Show this help message"
+            )
+
+        @self.app.on_message(filters.command("help"))
+        async def help_command(client, message: Message):
+            await message.reply_text(
+                "🤖 **Bot Help**\n\n"
+                "**Available Commands:**\n"
+                "/start - Start the bot\n"
+                "/upload - Upload file to Wasabi (reply to file)\n"
+                "/download <filename> - Download file\n"
+                "/list - List all files\n"
+                "/stream <filename> - Get streaming links\n\n"
+                "**Supported Media Players:**\n"
+                "• MX Player, VLC, PotPlayer\n"
+                "• MPV, nPlayer, Infuse\n"
+                "• Kodi, Jellyfin, Plex"
             )
 
         @self.app.on_message(filters.command("upload") & filters.private)
@@ -169,6 +169,19 @@ class TelegramBot:
                 return
             
             await self.handle_stream(message)
+
+        # Callback query handler for buttons
+        @self.app.on_callback_query()
+        async def handle_callback(client, callback_query):
+            data = callback_query.data
+            if data.startswith("stream_"):
+                filename = data.replace("stream_", "")
+                await self.send_stream_links(callback_query.message, filename)
+            elif data.startswith("download_"):
+                filename = data.replace("download_", "")
+                await self.handle_callback_download(callback_query.message, filename)
+            
+            await callback_query.answer()
 
     async def handle_upload(self, message: Message):
         """Handle file upload to Wasabi"""
@@ -219,10 +232,10 @@ class TelegramBot:
     async def handle_download(self, message: Message):
         """Handle file download from Wasabi"""
         try:
-            filename = message.command[1]
+            filename = ' '.join(message.command[1:])
             msg = await message.reply_text("📥 Downloading from Wasabi...")
             
-            download_path = f"downloads/{filename}"
+            download_path = f"downloads/{os.path.basename(filename)}"
             os.makedirs("downloads", exist_ok=True)
             
             success = await self.wasabi.download_file(filename, download_path)
@@ -240,6 +253,31 @@ class TelegramBot:
                 
         except Exception as e:
             logger.error(f"Download error: {e}")
+            await message.reply_text(f"❌ Error: {str(e)}")
+
+    async def handle_callback_download(self, message: Message, filename: str):
+        """Handle download from callback"""
+        try:
+            msg = await message.reply_text("📥 Downloading from Wasabi...")
+            
+            download_path = f"downloads/{os.path.basename(filename)}"
+            os.makedirs("downloads", exist_ok=True)
+            
+            success = await self.wasabi.download_file(filename, download_path)
+            
+            if success and os.path.exists(download_path):
+                await msg.edit_text("📤 Sending file...")
+                await message.reply_document(
+                    download_path,
+                    caption=f"📁 {filename}"
+                )
+                os.remove(download_path)
+                await msg.delete()
+            else:
+                await msg.edit_text("❌ File not found or download failed!")
+                
+        except Exception as e:
+            logger.error(f"Callback download error: {e}")
             await message.reply_text(f"❌ Error: {str(e)}")
 
     async def handle_list(self, message: Message):
@@ -269,41 +307,51 @@ class TelegramBot:
     async def handle_stream(self, message: Message):
         """Generate streaming links"""
         try:
-            filename = message.command[1]
-            msg = await message.reply_text("🔗 Generating streaming links...")
+            filename = ' '.join(message.command[1:])
+            await self.send_stream_links(message, filename)
             
-            stream_url = self.wasabi.generate_presigned_url(filename)
-            
-            if stream_url:
-                # Create media player links
-                players = self.generate_player_links(stream_url, filename)
-                
-                response_text = f"**🎬 Streaming Links for `{filename}`**\n\n"
-                response_text += f"**Direct URL:**\n`{stream_url}`\n\n"
-                response_text += "**Media Players:**\n"
-                
-                keyboard_buttons = []
-                for player_name, player_url in players.items():
-                    response_text += f"• [{player_name}]({player_url})\n"
-                    keyboard_buttons.append(
-                        [InlineKeyboardButton(f"▶️ {player_name}", url=player_url)]
-                    )
-                
-                await msg.edit_text(
-                    response_text,
-                    reply_markup=InlineKeyboardMarkup(keyboard_buttons),
-                    disable_web_page_preview=True
-                )
-            else:
-                await msg.edit_text("❌ Failed to generate streaming link!")
-                
         except Exception as e:
             logger.error(f"Stream error: {e}")
             await message.reply_text(f"❌ Error: {str(e)}")
 
+    async def send_stream_links(self, message: Message, filename: str):
+        """Send streaming links to user"""
+        msg = await message.reply_text("🔗 Generating streaming links...")
+        
+        stream_url = self.wasabi.generate_presigned_url(filename)
+        
+        if stream_url:
+            # Create media player links
+            players = self.generate_player_links(stream_url, filename)
+            
+            response_text = f"**🎬 Streaming Links for `{filename}`**\n\n"
+            response_text += f"**Direct URL:**\n`{stream_url}`\n\n"
+            response_text += "**Media Players:**\n"
+            
+            keyboard_buttons = []
+            for player_name, player_url in players.items():
+                response_text += f"• {player_name}: `{player_url}`\n"
+                keyboard_buttons.append(
+                    [InlineKeyboardButton(f"▶️ {player_name}", url=player_url)]
+                )
+            
+            # Add direct URL button
+            keyboard_buttons.append(
+                [InlineKeyboardButton("🔗 Direct URL", url=stream_url)]
+            )
+            
+            await msg.edit_text(
+                response_text,
+                reply_markup=InlineKeyboardMarkup(keyboard_buttons),
+                disable_web_page_preview=True
+            )
+        else:
+            await msg.edit_text("❌ Failed to generate streaming link!")
+
     def generate_player_links(self, stream_url: str, filename: str) -> Dict[str, str]:
         """Generate links for various media players"""
-        encoded_url = stream_url.replace('=', '%3D').replace('&', '%26')
+        import urllib.parse
+        encoded_url = urllib.parse.quote(stream_url, safe='')
         
         players = {
             "MX Player": f"intent:{stream_url}#Intent;package=com.mxtech.videoplayer.ad;end",
@@ -336,8 +384,23 @@ class TelegramBot:
         """Start the bot"""
         await self.app.start()
         logger.info("Bot started successfully!")
+        
+        # Get bot info
+        me = await self.app.get_me()
+        logger.info(f"Bot @{me.username} is now running!")
+        
+        # Keep the bot running
         await self.app.idle()
 
-if __name__ == "__main__":
+def main():
+    """Main function to run the bot"""
     bot = TelegramBot()
+    
+    # Create downloads directory
+    os.makedirs("downloads", exist_ok=True)
+    
+    # Run the bot
     asyncio.run(bot.run())
+
+if __name__ == "__main__":
+    main()
