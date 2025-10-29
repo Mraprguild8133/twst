@@ -152,14 +152,6 @@ class ProgressCallback:
         if asyncio.get_event_loop().is_running():
             asyncio.create_task(self._edit_message())
 
-# --- Helper Functions ---
-async def log_to_channel(text: str):
-    """Send a message to the designated log channel."""
-    try:
-        await app.send_message(config.LOG_CHANNEL_ID, text, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        LOGGER.error(f"Failed to send log message to channel: {e}")
-
 def generate_streaming_link(object_key: str, expires_in: int = None) -> str:
     """Generate a secure, pre-signed URL for streaming from Wasabi."""
     if expires_in is None:
@@ -185,10 +177,7 @@ async def start_command(client: Client, message: Message):
         "I can handle file uploads up to 5GB, powered by Pyrogram and Wasabi S3.\n"
         "Just send me any file and I'll upload it, providing a direct streaming link."
     )
-    await log_to_channel(
-        f"<b>User Started:</b> "
-        f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>"
-    )
+    LOGGER.info(f"User {message.from_user.id} started the bot")
 
 @app.on_message(filters.command("stats") & filters.user(config.ADMIN_IDS))
 async def stats_command(client: Client, message: Message):
@@ -270,7 +259,7 @@ async def file_handler(client: Client, message: Message):
             f"{file_info.file_unique_id}_{file_name}"
         )
 
-        LOGGER.info(f"Processing file: {file_name} ({file_size} bytes)")
+        LOGGER.info(f"Processing file: {file_name} ({file_size} bytes) from user {message.from_user.id}")
 
         # Initial status message
         status_msg = await message.reply_text(f"📥 Starting download of `{file_name}`...")
@@ -328,12 +317,7 @@ async def file_handler(client: Client, message: Message):
                 streaming_link = generate_streaming_link(wasabi_object_key)
                 
                 if streaming_link:
-                    await log_to_channel(
-                        f"✅ <b>File Uploaded:</b> "
-                        f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>\n"
-                        f"<b>File:</b> <code>{file_name}</code>\n"
-                        f"<b>Size:</b> {human_readable_size(file_size)}"
-                    )
+                    LOGGER.info(f"File uploaded successfully: {file_name} ({file_size} bytes) for user {message.from_user.id}")
 
                     final_text = (
                         f"✅ **Upload Complete!**\n\n"
@@ -391,7 +375,6 @@ async def main():
         await app.start()
         me = await app.get_me()
         LOGGER.info(f"Bot started successfully: @{me.username}")
-        await log_to_channel(f"🤖 <b>Bot Started</b> - @{me.username}")
         
         LOGGER.info("Bot is running. Press Ctrl+C to stop.")
         await idle()
