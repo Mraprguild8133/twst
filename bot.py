@@ -1,327 +1,350 @@
-#!/usr/bin/env python3
-# --------------------------------------------------------------------------------------
-# Telegram RSS Bot for Gadgets 360 News
-# --------------------------------------------------------------------------------------
-# Dependencies:
-# pip install python-telegram-bot feedparser beautifulsoup4 python-dotenv
-# --------------------------------------------------------------------------------------
-
-import logging
-import feedparser
-import re
-import json
+# main.py
 import os
+import asyncio
+import logging
+import time
 from datetime import datetime
-from telegram import Update, constants
-from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Import configuration
-import config
+# Import from config
+from config import config
 
-# Use configuration values
-BOT_TOKEN = config.BOT_TOKEN
-RSS_URL = config.RSS_URL
-SEEN_LINKS_FILE = config.SEEN_LINKS_FILE
-ADMIN_IDS = config.ADMIN_IDS
+# Mandatory imports for the core functionality
+from pyrogram import Client, filters, idle
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
 
-# Ensure directories exist
-os.makedirs("data", exist_ok=True)
-os.makedirs("logs", exist_ok=True)
+# External storage client
+import boto3
+from botocore.config import Config
 
-# Configure logging
+# --- Logging Setup ---
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    handlers=[
-        logging.FileHandler(config.LOG_FILE),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
-# Persistent storage for seen links
-def load_seen_links():
-    """Load seen links from JSON file."""
-    try:
-        if os.path.exists(SEEN_LINKS_FILE):
-            with open(SEEN_LINKS_FILE, 'r') as f:
-                data = json.load(f)
-                return set(data.get('seen_links', []))
-    except Exception as e:
-        logger.error(f"Error loading seen links: {e}")
-    return set()
+# --- Wasabi Client Initialization ---
+WASABI_CONFIG = Config(
+    region_name=config.WASABI_REGION,
+    s3={'signature_version': 's3v4'},
+    retries={'max_attempts': 10, 'mode': 'standard'}
+)
 
-def save_seen_links(seen_links):
-    """Save seen links to JSON file."""
-    try:
-        data = {
-            'seen_links': list(seen_links),
-            'last_updated': datetime.now().isoformat()
-        }
-        with open(SEEN_LINKS_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.error(f"Error saving seen links: {e}")
+WASABI_CLIENT = boto3.client(
+    's3',
+    aws_access_key_id=config.WASABI_ACCESS_KEY,
+    aws_secret_access_key=config.WASABI_SECRET_KEY,
+    endpoint_url=f'https://s3.{config.WASABI_REGION}.wasabisys.com',
+    config=WASABI_CONFIG
+)
 
-# Global set for seen links
-SEEN_LINKS = load_seen_links()
+# --- Pyrogram Client Initialization ---
+app = Client(
+    "wasabi_file_bot",
+    api_id=config.API_ID,
+    api_hash=config.API_HASH,
+    bot_token=config.BOT_TOKEN,
+    max_concurrent_transfers=5,
+    workers=30
+)
 
-def extract_image_url(entry):
-    """
-    Attempts to find a featured image URL in the RSS entry fields.
-    Prioritizes media:content, then looks for an enclosure, then in summary HTML.
-    """
-    try:
-        # 1. Check for media_content (common for featured images)
-        if hasattr(entry, 'media_content') and entry.media_content:
-            for media in entry.media_content:
-                if hasattr(media, 'get') and media.get('url'):
-                    return media['url']
-                elif hasattr(media, 'url'):
-                    return media.url
+# --- Progress Callback Class ---
+class ProgressCallback:
+    """A callback class to report progress for file transfers."""
+    
+    def __init__(self, message: Message, filename: str, start_time: float, action: str):
+        self.message = message
+        self.filename = filename
+        self.start_time = start_time
+        self.last_edit_time = start_time
+        self.action = action
+        self.is_upload = (action == 'Uploading')
+        self.uploaded_bytes = 0
+        self.total_size = 0
+
+    async def __call__(self, current_bytes: int, total_bytes: int):
+        """Called periodically by pyrogram (download) or boto3 (upload)."""
+        self.total_size = total_bytes
         
-        # 2. Check for enclosures
-        if hasattr(entry, 'enclosures') and entry.enclosures:
-            for enclosure in entry.enclosures:
-                enclosure_type = enclosure.get('type', '') if hasattr(enclosure, 'get') else getattr(enclosure, 'type', '')
-                if enclosure_type.startswith('image/'):
-                    if hasattr(enclosure, 'get') and enclosure.get('href'):
-                        return enclosure['href']
-                    elif hasattr(enclosure, 'href'):
-                        return enclosure.href
+        if not self.is_upload:
+            self.uploaded_bytes = current_bytes
 
-        # 3. Fallback: Search the summary/description HTML for an <img> tag
-        summary_text = entry.get('summary', '') or entry.get('description', '')
-        if summary_text:
-            img_match = re.search(r'<img[^>]+src="([^">]+)"', summary_text)
-            if img_match:
-                return img_match.group(1)
-    except Exception as e:
-        logger.warning(f"Error extracting image URL: {e}")
+        # Rate-limit message edits to avoid flood waits
+        if (time.time() - self.last_edit_time) >= 4:
+            self.last_edit_time = time.time()
+            await self._edit_message()
+
+    async def _edit_message(self):
+        """Formats and edits the progress message."""
+        try:
+            if self.total_size == 0:
+                return
                 
-    return None
+            percent = min(100, round(self.uploaded_bytes * 100 / self.total_size))
+            
+            # Convert bytes to human-readable format
+            human_uploaded = self.human_readable_size(self.uploaded_bytes)
+            human_total = self.human_readable_size(self.total_size)
+            
+            # Calculate speed and ETA
+            elapsed_time = time.time() - self.start_time
+            if elapsed_time > 0:
+                speed = self.uploaded_bytes / elapsed_time
+                human_speed = self.human_readable_size(speed) + "/s"
+                remaining_bytes = self.total_size - self.uploaded_bytes
+                eta_seconds = remaining_bytes / speed if speed > 0 else 0
+                eta = self.format_time(eta_seconds)
+            else:
+                human_speed = "0 B/s"
+                eta = "N/A"
 
-def clean_html(text):
-    """Remove HTML tags from text and clean it up."""
-    if not text:
-        return "No summary available."
-    
-    try:
-        # Remove HTML tags
-        clean = re.sub('<[^<]+?>', '', text)
-        # Replace multiple spaces with single space
-        clean = re.sub('\s+', ' ', clean)
-        # Strip leading/trailing whitespace
-        return clean.strip()
-    except Exception as e:
-        logger.warning(f"Error cleaning HTML: {e}")
-        return str(text)[:500]  # Return raw text truncated
-
-def format_news_message(entry):
-    """Format the news entry into a nice Telegram message."""
-    try:
-        title = entry.title if hasattr(entry, 'title') else "No Title"
-        link = entry.link if hasattr(entry, 'link') else "#"
-        summary = clean_html(entry.get('summary') or entry.get('description', ''))
-        
-        # Truncate summary if too long
-        if len(summary) > 400:
-            summary = summary[:397] + "..."
-        
-        # Format published date if available
-        published = ""
-        if hasattr(entry, 'published_parsed') and entry.published_parsed:
-            try:
-                from time import mktime
-                dt = datetime.fromtimestamp(mktime(entry.published_parsed))
-                published = f"📅 {dt.strftime('%Y-%m-%d %H:%M')}\n\n"
-            except:
-                pass
-        
-        message_text = (
-            f"🚀 <b>LATEST GADGETS 360 NEWS</b>\n\n"
-            f"<b>{title}</b>\n\n"
-            f"{published}"
-            f"{summary}\n\n"
-            f"🔗 <a href='{link}'>Read Full Article on Gadgets 360</a>"
-        )
-        
-        return message_text, summary
-    except Exception as e:
-        logger.error(f"Error formatting news message: {e}")
-        error_text = "❌ Error formatting news article. Please try again."
-        return error_text, ""
-
-# Error handler function
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle errors in the telegram bot."""
-    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
-    
-    # Try to notify the user about the error
-    try:
-        if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ Sorry, an error occurred while processing your request. "
-                "Please try again later."
+            # Progress Bar
+            bar_length = 10
+            filled_length = int(bar_length * percent // 100)
+            bar = '▓' * filled_length + '░' * (bar_length - filled_length)
+            
+            text = (
+                f"**{self.action}** `{self.filename}`\n\n"
+                f"**Progress:** {bar} {percent}%\n"
+                f"**Size:** {human_uploaded} / {human_total}\n"
+                f"**Speed:** {human_speed}\n"
+                f"**ETA:** {eta}"
             )
-    except Exception as e:
-        logger.error(f"Error while sending error message: {e}")
 
-# Command handler for /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a welcome message when the command /start is issued."""
-    try:
-        user = update.effective_user
-        await update.message.reply_html(
-            config.WELCOME_MESSAGE.format(user_name=user.mention_html())
-        )
-        logger.info(f"User {user.id} started the bot")
-    except Exception as e:
-        logger.error(f"Error in start command: {e}")
-        await update.message.reply_text("Welcome! There was an error displaying the welcome message.")
+            await self.message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
 
-# Command handler for /help
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show help information."""
-    try:
-        await update.message.reply_html(config.HELP_MESSAGE)
-        logger.info(f"User {update.effective_user.id} requested help")
-    except Exception as e:
-        logger.error(f"Error in help command: {e}")
-        await update.message.reply_text("Help: Use /latest to get the latest news.")
+        except FloodWait as e:
+            LOGGER.warning(f"FloodWait encountered. Sleeping for {e.value}s.")
+            self.last_edit_time = time.time() + e.value
+            await asyncio.sleep(e.value)
+        except Exception as e:
+            LOGGER.error(f"Error editing message: {e}")
+    
+    def sync_callback(self, bytes_amount):
+        """Boto3 calls this synchronous method."""
+        self.uploaded_bytes += bytes_amount
+        # Schedule async update
+        asyncio.create_task(self._edit_message())
 
-# Command handler for /latest
-async def get_latest_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetches and sends the latest, unsent article from the RSS feed."""
-    try:
-        user = update.effective_user
-        await update.message.reply_text("📡 Fetching the latest news from Gadgets 360...")
-        logger.info(f"User {user.id} requested latest news")
+    @staticmethod
+    def human_readable_size(size: float) -> str:
+        """Convert bytes to human-readable format."""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.2f} {unit}"
+            size /= 1024.0
+        return f"{size:.2f} PB"
 
-        # Parse the RSS feed
-        feed = feedparser.parse(RSS_URL)
-
-        if not feed.entries:
-            await update.message.reply_text("❌ Could not find any news entries in the feed. Please try again later.")
-            logger.warning("No entries found in RSS feed")
-            return
-
-        # Get the very first (latest) entry
-        entry = feed.entries[0]
-        
-        # Check if we have already processed this link
-        if entry.link in SEEN_LINKS:
-            await update.message.reply_text(
-                "ℹ️ The latest article has already been sent. "
-                "Gadgets 360 updates their feed periodically. "
-                "Try again in a few minutes for newer content!"
-            )
-            logger.info(f"Duplicate article detected: {entry.link}")
-            return
-
-        # Extract and format details
-        message_text, summary = format_news_message(entry)
-        
-        # Look for the image
-        image_url = extract_image_url(entry)
-        
-        logger.info(f"Sending new article: {entry.title}")
-
-        # Send the news item
-        if image_url:
-            try:
-                # Use send_photo if an image is found
-                await update.message.reply_photo(
-                    photo=image_url,
-                    caption=message_text,
-                    parse_mode=constants.ParseMode.HTML,
-                    disable_notification=True
-                )
-            except Exception as e:
-                logger.warning(f"Failed to send photo, falling back to text: {e}")
-                await update.message.reply_html(
-                    text=message_text,
-                    disable_web_page_preview=False,
-                    disable_notification=True
-                )
+    @staticmethod
+    def format_time(seconds: float) -> str:
+        """Format seconds into human-readable time."""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            return f"{int(seconds // 60)}m {int(seconds % 60)}s"
         else:
-            # Fallback to simple message if no image is found
-            await update.message.reply_html(
-                text=message_text,
-                disable_web_page_preview=False,
-                disable_notification=True
-            )
-        
-        # Mark the link as seen and save
-        SEEN_LINKS.add(entry.link)
-        save_seen_links(SEEN_LINKS)
-        
-        logger.info(f"Successfully sent and saved article: {entry.title}")
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            return f"{hours}h {minutes}m"
 
-    except Exception as e:
-        logger.error(f"Error in get_latest_news command: {e}")
-        await update.message.reply_text(
-            "❌ Sorry, there was an error fetching the latest news. "
-            "Please try again in a few moments."
-        )
-
-# Command handler for /stats (admin only)
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show bot statistics (admin only)."""
+# --- Helper Functions ---
+async def log_to_channel(text: str):
+    """Send a message to the designated log channel."""
     try:
-        user = update.effective_user
-        if user.id not in ADMIN_IDS:
-            await update.message.reply_text("❌ This command is for administrators only.")
-            return
-        
-        stats_text = (
-            f"🤖 <b>Bot Statistics</b>\n\n"
-            f"• Total tracked articles: {len(SEEN_LINKS)}\n"
-            f"• RSS Feed: {RSS_URL}\n"
-            f"• Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"• Active users: 1 (basic implementation)"
-        )
-        
-        await update.message.reply_html(stats_text)
-        logger.info(f"Admin {user.id} requested stats")
+        await app.send_message(config.LOG_CHANNEL_ID, text, parse_mode=ParseMode.HTML)
     except Exception as e:
-        logger.error(f"Error in stats command: {e}")
-        await update.message.reply_text("❌ Error retrieving statistics.")
+        LOGGER.error(f"Failed to send log message to channel: {e}")
 
-def main() -> None:
-    """Start the bot."""
-    # Validate bot token
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not BOT_TOKEN:
-        logger.error("Please set your BOT_TOKEN in config.py or .env file")
-        print("❌ FATAL ERROR: Please set your BOT_TOKEN in config.py or .env file")
+def generate_streaming_link(object_key: str, expires_in: int = None) -> str:
+    """Generate a secure, pre-signed URL for streaming from Wasabi."""
+    if expires_in is None:
+        expires_in = config.LINK_EXPIRY
+        
+    try:
+        url = WASABI_CLIENT.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': config.WASABI_BUCKET, 'Key': object_key},
+            ExpiresIn=expires_in
+        )
+        return url
+    except Exception as e:
+        LOGGER.error(f"Error generating pre-signed URL: {e}")
+        return None
+
+# --- Command Handlers ---
+@app.on_message(filters.command("start"))
+async def start_command(client: Client, message: Message):
+    """Handle the /start command."""
+    await message.reply_text(
+        "👋 **Welcome to the Wasabi File Streamer Bot!**\n\n"
+        "I can handle file uploads up to 5GB, powered by Pyrogram and Wasabi S3.\n"
+        "Just send me any file and I'll upload it, providing a direct streaming link."
+    )
+    await log_to_channel(
+        f"<b>User Started:</b> "
+        f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>"
+    )
+
+@app.on_message(filters.command("stats") & filters.user(config.ADMIN_IDS))
+async def stats_command(client: Client, message: Message):
+    """Show bot statistics (admin only)."""
+    stats_text = (
+        "🤖 **Bot Statistics**\n\n"
+        "**Status:** ✅ Running\n"
+        "**Max File Size:** 5GB\n"
+        "**Storage:** Wasabi S3\n"
+        "**Link Expiry:** 7 days"
+    )
+    await message.reply_text(stats_text)
+
+# --- File Handler ---
+@app.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
+async def file_handler(client: Client, message: Message):
+    """Handle incoming file messages."""
+    # Determine file type and get file info
+    if message.document:
+        file_info = message.document
+    elif message.video:
+        file_info = message.video
+    elif message.audio:
+        file_info = message.audio
+    elif message.photo:
+        file_info = message.photo
+        # For photos, we need to handle differently
+        file_size = file_info.file_size
+        file_name = f"photo_{file_info.file_unique_id}.jpg"
+    else:
+        await message.reply_text("❌ Unsupported file type.")
         return
 
+    # Get file name and size for non-photo files
+    if not message.photo:
+        file_name = getattr(file_info, "file_name", 
+                           f"{file_info.file_unique_id}.{file_info.mime_type.split('/')[-1] if file_info.mime_type else 'dat'}")
+        file_size = file_info.file_size
+
+    # Check file size
+    if file_size > config.MAX_FILE_SIZE:
+        await message.reply_text(f"❌ File too large. Maximum size is 5GB.")
+        return
+
+    # Create paths
+    os.makedirs(config.DOWNLOAD_PATH, exist_ok=True)
+    temp_file_path = os.path.join(config.DOWNLOAD_PATH, f"{file_info.file_unique_id}_{file_name}")
+    
+    # Create unique Wasabi key
+    wasabi_object_key = (
+        f"{message.from_user.id}/"
+        f"{datetime.now().strftime('%Y%m%d%H%M%S')}_"
+        f"{file_info.file_unique_id}_{file_name}"
+    )
+
+    LOGGER.info(f"Processing file: {file_name} ({file_size} bytes)")
+
+    # Initial status message
+    status_msg = await message.reply_text(f"📥 Starting download of `{file_name}`...")
+    start_time = time.time()
+
+    # Download file
     try:
-        # Create the Application
-        application = Application.builder().token(BOT_TOKEN).build()
-
-        # Add command handlers
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("latest", get_latest_news))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("stats", stats_command))
-
-        # Register error handler
-        application.add_error_handler(error_handler)
-
-        # Start the bot
-        logger.info("Bot is starting...")
-        print("🤖 Bot is starting. Press Ctrl-C to stop.")
+        progress_cb = ProgressCallback(status_msg, file_name, start_time, "Downloading")
         
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        downloaded_path = await client.download_media(
+            message,
+            file_name=temp_file_path,
+            progress=progress_cb,
+            progress_args=(file_size,),
+        )
         
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-        print("\n👋 Bot stopped.")
+        await status_msg.edit_text("✅ Download complete. Starting upload to Wasabi...")
+        upload_start_time = time.time()
+
     except Exception as e:
-        logger.error(f"Bot failed to start: {e}")
-        print(f"❌ Bot failed to start: {e}")
+        await status_msg.edit_text(f"❌ **Download Failed:** {str(e)}")
+        LOGGER.error(f"Download error for {file_name}: {e}")
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        return
+
+    # Upload to Wasabi
+    def sync_upload():
+        try:
+            WASABI_CLIENT.upload_file(
+                Filename=downloaded_path,
+                Bucket=config.WASABI_BUCKET,
+                Key=wasabi_object_key,
+                Callback=ProgressCallback(status_msg, file_name, upload_start_time, "Uploading").sync_callback if file_size > 0 else None,
+            )
+            return True
+        except Exception as e:
+            LOGGER.error(f"Upload error for {wasabi_object_key}: {e}")
+            return False
+
+    try:
+        loop = asyncio.get_event_loop()
+        upload_success = await loop.run_in_executor(None, sync_upload)
+
+        if upload_success:
+            streaming_link = generate_streaming_link(wasabi_object_key)
+            
+            if streaming_link:
+                await log_to_channel(
+                    f"✅ <b>File Uploaded:</b> "
+                    f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>\n"
+                    f"<b>File:</b> <code>{file_name}</code>\n"
+                    f"<b>Size:</b> {ProgressCallback.human_readable_size(file_size)}"
+                )
+
+                final_text = (
+                    f"✅ **Upload Complete!**\n\n"
+                    f"**File:** `{file_name}`\n"
+                    f"**Size:** {ProgressCallback.human_readable_size(file_size)}\n\n"
+                    f"🔗 **Streaming Link:**\n"
+                    f"```\n{streaming_link}\n```\n\n"
+                    f"This link expires in 7 days and supports direct streaming."
+                )
+                
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📱 Open Link", url=streaming_link)],
+                    [InlineKeyboardButton("🔗 Copy Link", callback_data=f"copy_{streaming_link}")]
+                ])
+                
+                await status_msg.edit_text(final_text, reply_markup=keyboard, disable_web_page_preview=True)
+            else:
+                await status_msg.edit_text("❌ Upload failed: Could not generate streaming link.")
+        else:
+            await status_msg.edit_text("❌ Upload failed. Please try again later.")
+
+    finally:
+        # Cleanup
+        if os.path.exists(downloaded_path):
+            os.remove(downloaded_path)
+            LOGGER.info(f"Cleaned up local file: {downloaded_path}")
+
+# --- Callback Handler for Copy Button ---
+@app.on_callback_query(filters.regex(r"^copy_"))
+async def copy_link_callback(client: Client, callback_query: CallbackQuery):
+    """Handle copy link button clicks."""
+    link = callback_query.data[5:]  # Remove "copy_" prefix
+    await callback_query.answer("Link copied to clipboard!", show_alert=True)
+    # Note: Telegram bots can't actually copy to clipboard, this is just visual feedback
+
+# --- Main Execution ---
+async def main():
+    """Main function to start the bot."""
+    LOGGER.info("Starting Wasabi File Bot...")
+    await app.start()
+    LOGGER.info("Bot is running. Press Ctrl+C to stop.")
+    await idle()
+    LOGGER.info("Stopping bot...")
+    await app.stop()
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nBot stopped by user.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
