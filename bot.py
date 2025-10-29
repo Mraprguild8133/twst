@@ -1,16 +1,16 @@
 import os
 import asyncio
 import logging
+import signal
+import sys
 from typing import List, Dict
 from datetime import datetime
 
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
-import aiofiles
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
-from pyrogram.enums import ParseMode
 
 from config import config
 
@@ -32,28 +32,19 @@ class WasabiStorage:
         )
         self.bucket = config.WASABI_BUCKET
 
-    async def upload_file(self, file_path: str, object_name: str) -> bool:
+    def upload_file(self, file_path: str, object_name: str) -> bool:
         """Upload file to Wasabi"""
         try:
-            # For async compatibility, we'll use threads
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None, 
-                lambda: self.s3_client.upload_file(file_path, self.bucket, object_name)
-            )
+            self.s3_client.upload_file(file_path, self.bucket, object_name)
             return True
         except Exception as e:
             logger.error(f"Upload failed: {e}")
             return False
 
-    async def download_file(self, object_name: str, file_path: str) -> bool:
+    def download_file(self, object_name: str, file_path: str) -> bool:
         """Download file from Wasabi"""
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: self.s3_client.download_file(self.bucket, object_name, file_path)
-            )
+            self.s3_client.download_file(self.bucket, object_name, file_path)
             return True
         except Exception as e:
             logger.error(f"Download failed: {e}")
@@ -204,11 +195,19 @@ class TelegramBot:
             await msg.edit_text("☁️ Uploading to Wasabi...")
             object_name = f"telegram/{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.file_name}"
             
-            success = await self.wasabi.upload_file(download_path, object_name)
+            # Run upload in thread pool
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                None, 
+                self.wasabi.upload_file, 
+                download_path, 
+                object_name
+            )
             
             if success:
                 # Clean up local file
-                os.remove(download_path)
+                if os.path.exists(download_path):
+                    os.remove(download_path)
                 
                 keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton("🎬 Stream Link", callback_data=f"stream_{object_name}"),
@@ -224,6 +223,8 @@ class TelegramBot:
                 )
             else:
                 await msg.edit_text("❌ Upload failed!")
+                if os.path.exists(download_path):
+                    os.remove(download_path)
                 
         except Exception as e:
             logger.error(f"Upload error: {e}")
@@ -238,7 +239,14 @@ class TelegramBot:
             download_path = f"downloads/{os.path.basename(filename)}"
             os.makedirs("downloads", exist_ok=True)
             
-            success = await self.wasabi.download_file(filename, download_path)
+            # Run download in thread pool
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                None,
+                self.wasabi.download_file,
+                filename,
+                download_path
+            )
             
             if success and os.path.exists(download_path):
                 await msg.edit_text("📤 Sending file...")
@@ -263,7 +271,14 @@ class TelegramBot:
             download_path = f"downloads/{os.path.basename(filename)}"
             os.makedirs("downloads", exist_ok=True)
             
-            success = await self.wasabi.download_file(filename, download_path)
+            # Run download in thread pool
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                None,
+                self.wasabi.download_file,
+                filename,
+                download_path
+            )
             
             if success and os.path.exists(download_path):
                 await msg.edit_text("📤 Sending file...")
@@ -285,7 +300,14 @@ class TelegramBot:
         try:
             msg = await message.reply_text("📂 Listing files...")
             
-            files = self.wasabi.list_files("telegram/")
+            # Run list operation in thread pool
+            loop = asyncio.get_event_loop()
+            files = await loop.run_in_executor(
+                None,
+                self.wasabi.list_files,
+                "telegram/"
+            )
+            
             if not files:
                 await msg.edit_text("📭 No files found!")
                 return
@@ -318,7 +340,13 @@ class TelegramBot:
         """Send streaming links to user"""
         msg = await message.reply_text("🔗 Generating streaming links...")
         
-        stream_url = self.wasabi.generate_presigned_url(filename)
+        # Generate URL in thread pool
+        loop = asyncio.get_event_loop()
+        stream_url = await loop.run_in_executor(
+            None,
+            self.wasabi.generate_presigned_url,
+            filename
+        )
         
         if stream_url:
             # Create media player links
@@ -330,7 +358,7 @@ class TelegramBot:
             
             keyboard_buttons = []
             for player_name, player_url in players.items():
-                response_text += f"• {player_name}: `{player_url}`\n"
+                response_text += f"• {player_name}\n"
                 keyboard_buttons.append(
                     [InlineKeyboardButton(f"▶️ {player_name}", url=player_url)]
                 )
@@ -380,7 +408,7 @@ class TelegramBot:
             
         return f"{size_bytes:.2f} {size_names[i]}"
 
-    async def run(self):
+    async def start(self):
         """Start the bot"""
         await self.app.start()
         logger.info("Bot started successfully!")
@@ -392,15 +420,33 @@ class TelegramBot:
         # Keep the bot running
         await self.app.idle()
 
-def main():
-    """Main function to run the bot"""
+    async def stop(self):
+        """Stop the bot"""
+        await self.app.stop()
+        logger.info("Bot stopped!")
+
+async def main():
+    """Main async function to run the bot"""
     bot = TelegramBot()
     
     # Create downloads directory
     os.makedirs("downloads", exist_ok=True)
     
-    # Run the bot
-    asyncio.run(bot.run())
+    # Setup signal handlers for graceful shutdown
+    def signal_handler(signum, frame):
+        logger.info("Received shutdown signal...")
+        asyncio.create_task(bot.stop())
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        await bot.start()
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+    finally:
+        await bot.stop()
 
 if __name__ == "__main__":
-    main()
+    # Run the bot
+    asyncio.run(main())
