@@ -1,47 +1,27 @@
+# config.py
 import os
-from typing import Optional
-from dotenv import load_dotenv
+from typing import List
 
-load_dotenv()
+# Telegram API Configuration
+API_ID = int(os.environ.get("API_ID", "12345"))
+API_HASH = os.environ.get("API_HASH", "YOUR_API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 
-class Config:
-    # Telegram API Configuration
-    API_ID = int(os.getenv('API_ID', 0))
-    API_HASH = os.getenv('API_HASH', '')
-    BOT_TOKEN = os.getenv('BOT_TOKEN', '')
-    
-    # Wasabi Storage Configuration
-    WASABI_ACCESS_KEY = os.getenv('WASABI_ACCESS_KEY', '')
-    WASABI_SECRET_KEY = os.getenv('WASABI_SECRET_KEY', '')
-    WASABI_BUCKET = os.getenv('WASABI_BUCKET', '')
-    WASABI_REGION = os.getenv('WASABI_REGION', 'us-east-1')
-    WASABI_ENDPOINT = f'https://s3.{WASABI_REGION}.wasabisys.com'
-    
-    # Bot Configuration
-    MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 4GB
-    DOWNLOAD_TIMEOUT = 300  # 5 minutes
-    TEMP_DIR = "temp_files"
-    
-    # URL Expiration (in seconds)
-    URL_EXPIRATION = 3600  # 1 hour
+# Admin Configuration
+ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "123456789")
+ADMIN_IDS = [int(i.strip()) for i in ADMIN_IDS_STR.split(',') if i.strip().isdigit()]
 
-    @classmethod
-    def validate_config(cls) -> bool:
-        """Validate that all required environment variables are set"""
-        required_vars = [
-            'API_ID', 'API_HASH', 'BOT_TOKEN',
-            'WASABI_ACCESS_KEY', 'WASABI_SECRET_KEY', 'WASABI_BUCKET'
-        ]
-        
-        missing_vars = []
-        for var in required_vars:
-            if not getattr(cls, var):
-                missing_vars.append(var)
-        
-        if missing_vars:
-            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
-        
-        return True
+# Wasabi Configuration
+WASABI_ACCESS_KEY = os.environ.get("WASABI_ACCESS_KEY", "YOUR_WASABI_ACCESS_KEY")
+WASABI_SECRET_KEY = os.environ.get("WASABI_SECRET_KEY", "YOUR_WASABI_SECRET_KEY")
+WASABI_BUCKET = os.environ.get("WASABI_BUCKET", "your-wasabi-bucket")
+WASABI_REGION = os.environ.get("WASABI_REGION", "us-east-1")
+WASABI_ENDPOINT_URL = f"https://s3.{WASABI_REGION}.wasabisys.com"
 
-# Global config instance
-config = Config()
+# Bot Configuration
+MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
+STREAM_EXPIRATION = 24 * 3600  # 24 hours
+TEMP_DIR = os.path.join(os.getcwd(), "temp_files")
+
+# Create temp directory if it doesn't exist
+os.makedirs(TEMP_DIR, exist_ok=True)
