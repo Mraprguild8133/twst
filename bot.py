@@ -15,19 +15,26 @@ app = Client(
     bot_token=config.BOT_TOKEN
 )
 
+# Global variable to store bot username
+bot_username = None
+
 # Filter to check if the user is an administrator
 def admin_filter(_, __, m: Message):
     return m.from_user and m.from_user.id in config.ADMIN_IDS
 
 admin_only = filters.create(admin_filter)
 
-# --- BOT STARTUP HOOK ---
-@app.on_startup()
+# --- STARTUP FUNCTION ---
 async def startup():
-    """Set bot username in config on startup"""
+    """Initialize bot on startup"""
+    global bot_username
+    await app.start()
     me = await app.get_me()
-    config.BOT_USERNAME = me.username
-    print(f"Bot started as @{config.BOT_USERNAME}")
+    bot_username = me.username
+    config.BOT_USERNAME = bot_username
+    print(f"🤖 Bot started as @{bot_username}")
+    print(f"💾 Storage Chat: {config.STORAGE_CHAT_ID}")
+    print(f"👑 Admins: {len(config.ADMIN_IDS)}")
 
 # --- HANDLERS ---
 
@@ -144,7 +151,7 @@ async def handle_file_upload(client: Client, message: Message):
 
         storage_id = stored_message.id
         encoded_id = base64.b64encode(str(storage_id).encode()).decode()
-        direct_link = f"https://t.me/{config.BOT_USERNAME}?start=file_{encoded_id}"
+        direct_link = f"https://t.me/{bot_username}?start=file_{encoded_id}"
 
         # Get file info
         file_name = (
@@ -232,7 +239,7 @@ async def generate_download_link(client: Client, message: Message):
     try:
         storage_id = int(message.command[1].strip())
         encoded_id = base64.b64encode(str(storage_id).encode()).decode()
-        direct_link = f"https://t.me/{config.BOT_USERNAME}?start=file_{encoded_id}"
+        direct_link = f"https://t.me/{bot_username}?start=file_{encoded_id}"
         
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 Open Link", url=direct_link)],
@@ -278,7 +285,7 @@ async def file_info(client: Client, message: Message):
         mime_type = getattr(file, 'mime_type', 'Unknown')
         
         encoded_id = base64.b64encode(str(storage_id).encode()).decode()
-        direct_link = f"https://t.me/{config.BOT_USERNAME}?start=file_{encoded_id}"
+        direct_link = f"https://t.me/{bot_username}?start=file_{encoded_id}"
         
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔗 Get Download Link", callback_data=f"link_{storage_id}")
@@ -300,14 +307,33 @@ async def file_info(client: Client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ Error retrieving file info: {str(e)}")
 
+@app.on_callback_query(filters.regex("^link_"))
+async def generate_link_callback(client, callback_query):
+    """Generate link from callback"""
+    storage_id = callback_query.data.replace("link_", "")
+    encoded_id = base64.b64encode(str(storage_id).encode()).decode()
+    direct_link = f"https://t.me/{bot_username}?start=file_{encoded_id}"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌐 Open Link", url=direct_link)],
+        [InlineKeyboardButton("📋 Copy Link", url=f"tg://copy?text={direct_link}")]
+    ])
+    
+    await callback_query.message.edit_text(
+        f"**🔗 Download Link Generated**\n\n"
+        f"**Storage ID:** `{storage_id}`\n"
+        f"**Direct Link:**\n`{direct_link}`",
+        reply_markup=keyboard,
+        disable_web_page_preview=True
+    )
+
 @app.on_message(filters.command("stats") & admin_only)
 async def bot_stats(client: Client, message: Message):
     """Show bot statistics"""
     try:
-        bot_me = await client.get_me()
         stats_text = (
             f"**📊 Bot Statistics**\n\n"
-            f"**🤖 Bot:** @{bot_me.username}\n"
+            f"**🤖 Bot:** @{bot_username}\n"
             f"**👑 Admins:** {len(config.ADMIN_IDS)}\n"
             f"**💾 Storage:** `{config.STORAGE_CHAT_ID}`\n"
             f"**📦 Max File Size:** {config.MAX_FILE_SIZE} MB\n"
@@ -325,6 +351,10 @@ async def bot_stats(client: Client, message: Message):
 # --- BOT STARTUP ---
 if __name__ == "__main__":
     print("🚀 Starting Enhanced File Store Bot...")
-    print(f"💾 Storage Chat: {config.STORAGE_CHAT_ID}")
-    print(f"👑 Admins: {len(config.ADMIN_IDS)}")
+    
+    # Run startup and then start the bot
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(startup())
+    
+    print("✅ Bot is running...")
     app.run()
