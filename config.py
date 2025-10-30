@@ -1,27 +1,34 @@
-# config.py
 import os
 from typing import List
 
-# Telegram API Configuration
-API_ID = int(os.environ.get("API_ID", "12345"))
-API_HASH = os.environ.get("API_HASH", "YOUR_API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
+class Config:
+    """Configuration class for the Telegram File Store Bot"""
+    
+    def __init__(self):
+        # Required environment variables
+        self.API_ID = int(os.environ['API_ID'])
+        self.API_HASH = os.environ['API_HASH']
+        self.BOT_TOKEN = os.environ['BOT_TOKEN']
+        
+        # Admin IDs - comma separated string of user IDs
+        admin_ids_str = os.environ.get('ADMIN_IDS', '')
+        self.ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(',')] if admin_ids_str else []
+        
+        # Storage chat ID (default to first admin if not specified)
+        self.STORAGE_CHAT_ID = int(os.environ.get('STORAGE_CHAT_ID', self.ADMIN_IDS[0] if self.ADMIN_IDS else None))
+        
+        # Optional settings with defaults
+        self.MAX_FILE_SIZE = int(os.environ.get('MAX_FILE_SIZE', 2000))  # in MB
+        self.ALLOWED_FILE_TYPES = os.environ.get('ALLOWED_FILE_TYPES', 'document,video,audio').split(',')
+        
+    def validate(self):
+        """Validate required configuration"""
+        if not self.ADMIN_IDS:
+            raise ValueError("At least one ADMIN_ID must be specified")
+        if not self.STORAGE_CHAT_ID:
+            raise ValueError("STORAGE_CHAT_ID must be specified")
+        
+        return self
 
-# Admin Configuration
-ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "123456789")
-ADMIN_IDS = [int(i.strip()) for i in ADMIN_IDS_STR.split(',') if i.strip().isdigit()]
-
-# Wasabi Configuration
-WASABI_ACCESS_KEY = os.environ.get("WASABI_ACCESS_KEY", "YOUR_WASABI_ACCESS_KEY")
-WASABI_SECRET_KEY = os.environ.get("WASABI_SECRET_KEY", "YOUR_WASABI_SECRET_KEY")
-WASABI_BUCKET = os.environ.get("WASABI_BUCKET", "your-wasabi-bucket")
-WASABI_REGION = os.environ.get("WASABI_REGION", "us-east-1")
-WASABI_ENDPOINT_URL = f"https://s3.{WASABI_REGION}.wasabisys.com"
-
-# Bot Configuration
-MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
-STREAM_EXPIRATION = 24 * 3600  # 24 hours
-TEMP_DIR = os.path.join(os.getcwd(), "temp_files")
-
-# Create temp directory if it doesn't exist
-os.makedirs(TEMP_DIR, exist_ok=True)
+# Create global config instance
+config = Config().validate()
