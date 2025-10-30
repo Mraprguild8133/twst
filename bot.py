@@ -1,434 +1,435 @@
-import asyncio
 import os
-import time
-import logging
-from typing import Optional
-from urllib.parse import urlparse
+import json
+import asyncio
+from datetime import datetime
+from typing import Dict, List
 
-# Telegram imports
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import (
-    RPCError, SessionPasswordNeeded, PhoneCodeInvalid,
-    PhoneCodeExpired, FloodWait, BadRequest
+import boto3
+from botocore.exceptions import ClientError
+from pyrogram import Client, filters
+from pyrogram.types import (
+    Message, InlineKeyboardButton, 
+    InlineKeyboardMarkup, CallbackQuery
+)
+from pyrogram.enums import ParseMode
+
+from config import Config
+
+# Initialize bot
+app = Client(
+    "wasabi_bot",
+    api_id=Config.API_ID,
+    api_hash=Config.API_HASH,
+    bot_token=Config.BOT_TOKEN
 )
 
-# Wasabi/AWS imports
-import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
+# Initialize Wasabi S3 client
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=Config.WASABI_ACCESS_KEY,
+    aws_secret_access_key=Config.WASABI_SECRET_KEY,
+    endpoint_url=Config.WASABI_ENDPOINT,
+    region_name=Config.WASABI_REGION
+)
 
-from config import config
+# Premium users storage
+PREMIUM_USERS_FILE = "premium_users.json"
 
-logger = logging.getLogger(__name__)
+def load_premium_users() -> Dict[str, Dict]:
+    try:
+        with open(PREMIUM_USERS_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-class TelegramWasabiBot:
-    def __init__(self):
-        self.app = None
-        self.wasabi_client = None
-        self.initialize_bot()
-    
-    def initialize_bot(self):
-        """Initialize bot components with error handling"""
-        try:
-            # Validate configuration first
-            config.validate()
-            
-            # Initialize Telegram client
-            self.app = Client(
-                "wasabi_bot",
-                api_id=config.API_ID,
-                api_hash=config.API_HASH,
-                bot_token=config.BOT_TOKEN,
-                sleep_threshold=60
-            )
-            
-            # Initialize Wasabi client
-            self.wasabi_client = self.init_wasabi_client()
-            
-            # Register handlers
-            self.register_handlers()
-            
-            logger.info("✅ Bot initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize bot: {e}")
-            raise
-    
-    def init_wasabi_client(self):
-        """Initialize Wasabi S3 client"""
-        try:
-            wasabi_endpoint = f"https://s3.{config.WASABI_REGION}.wasabisys.com"
-            
-            session = boto3.Session(
-                aws_access_key_id=config.WASABI_ACCESS_KEY,
-                aws_secret_access_key=config.WASABI_SECRET_KEY
-            )
-            
-            client = session.client(
-                's3',
-                endpoint_url=wasabi_endpoint,
-                region_name=config.WASABI_REGION
-            )
-            
-            # Test connection
-            client.head_bucket(Bucket=config.WASABI_BUCKET)
-            logger.info("✅ Wasabi connection successful")
-            
-            return client
-            
-        except NoCredentialsError:
-            logger.error("❌ Wasabi credentials not found")
-            raise
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'NoSuchBucket':
-                logger.error(f"❌ Bucket '{config.WASABI_BUCKET}' not found")
-            elif error_code == 'InvalidAccessKeyId':
-                logger.error("❌ Invalid Wasabi access key")
-            else:
-                logger.error(f"❌ Wasabi connection error: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"❌ Unexpected Wasabi error: {e}")
-            raise
-    
-    def register_handlers(self):
-        """Register message handlers"""
-        
-        @self.app.on_message(filters.command("start"))
-        async def start_handler(client, message: Message):
-            await self.handle_start(message)
-        
-        @self.app.on_message(filters.command("help"))
-        async def help_handler(client, message: Message):
-            await self.handle_help(message)
-        
-        @self.app.on_message(filters.document | filters.video | filters.audio)
-        async def file_handler(client, message: Message):
-            await self.handle_file_upload(message)
-        
-        @self.app.on_message(filters.photo)
-        async def photo_handler(client, message: Message):
-            await self.handle_photo_upload(message)
-    
-    async def handle_start(self, message: Message):
-        """Handle /start command"""
-        try:
-            welcome_text = f"""
-🤖 **Welcome to File Storage Bot!**
+def save_premium_users(users: Dict[str, Dict]):
+    with open(PREMIUM_USERS_FILE, 'w') as f:
+        json.dump(users, f, indent=4)
 
-I can help you store files up to 4GB on Wasabi cloud storage.
+premium_users = load_premium_users()
+
+def is_premium_user(user_id: int) -> bool:
+    return str(user_id) in premium_users
+
+def is_admin(user_id: int) -> bool:
+    return user_id in Config.ADMIN_IDS
+
+@app.on_message(filters.command("start"))
+async def start_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    welcome_text = """
+🤖 **Welcome to Premium File Storage Bot**
 
 **Features:**
-• Upload any file type
-• High-speed downloads  
-• Secure cloud storage
+• Upload files up to 4GB
+• High-speed Wasabi storage
 • Direct download links
+• Secure file sharing
 
-**Just send me any file to get started!**
+**Premium Benefits:**
+✅ Unlimited uploads
+✅ Fast download speeds
+✅ 4GB file support
+✅ Priority support
 
-**Verification Required:** {config.VERIFICATION_URL}
-            """
-            
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📁 Upload Files", callback_data="upload_help")],
-                [InlineKeyboardButton("🔗 Get Verification", url=config.VERIFICATION_URL)],
-                [InlineKeyboardButton("❓ Help", callback_data="help")]
-            ])
-            
-            await message.reply_text(welcome_text, reply_markup=keyboard)
-            logger.info(f"✅ Start command handled for user {message.from_user.id}")
-            
-        except Exception as e:
-            logger.error(f"❌ Error in start handler: {e}")
-            await message.reply_text("❌ Sorry, something went wrong!")
+Use /premium to get premium access!
+    """
     
-    async def handle_help(self, message: Message):
-        """Handle /help command"""
-        help_text = f"""
-**📖 How to use this bot:**
-
-1. **Upload Files**: Simply send me any file (document, video, audio, photo)
-2. **Auto Processing**: I'll automatically upload it to Wasabi cloud storage
-3. **Get Link**: You'll receive a direct download link
-4. **Share**: Share the link with anyone!
-
-**📋 Supported Files:**
-• Documents (PDF, ZIP, etc.)
-• Videos (MP4, AVI, etc.) 
-• Audio (MP3, WAV, etc.)
-• Photos (JPG, PNG, etc.)
-
-**⚡ Limits:**
-• Max file size: 4GB
-• Download links valid for 7 days
-
-**🔗 Verification:** {config.VERIFICATION_URL}
-        """
-        
-        await message.reply_text(help_text)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌟 Get Premium", callback_data="get_premium")],
+        [InlineKeyboardButton("📤 Upload File", callback_data="upload_help"),
+         InlineKeyboardButton("📥 My Files", callback_data="my_files")]
+    ])
     
-    async def handle_file_upload(self, message: Message):
-        """Handle document, video, and audio files"""
-        try:
-            # Get file info
-            if message.document:
-                file = message.document
-                file_type = "document"
-            elif message.video:
-                file = message.video
-                file_type = "video"
-            elif message.audio:
-                file = message.audio
-                file_type = "audio"
-            else:
-                return
-            
-            file_name = getattr(file, 'file_name', f'{file_type}_{message.id}')
-            file_size = file.file_size
-            
-            logger.info(f"📥 Processing {file_type}: {file_name} ({self.format_size(file_size)})")
-            
-            # Check file size
-            if file_size > config.MAX_FILE_SIZE:
-                await message.reply_text("❌ File too large! Maximum size is 4GB.")
-                return
-            
-            # Start processing
-            status_msg = await message.reply_text(
-                f"📥 **Downloading File...**\n"
-                f"📁 Name: `{file_name}`\n"
-                f"📦 Size: {self.format_size(file_size)}\n"
-                f"⏳ Status: Starting..."
-            )
-            
-            # Download file
-            file_path = await self.download_file(message, file, status_msg)
-            if not file_path:
-                return
-            
-            # Upload to Wasabi
-            download_url = await self.upload_to_wasabi(file_path, file_name, status_msg)
-            
-            if download_url:
-                # Send success message
-                success_text = f"""
-✅ **File Uploaded Successfully!**
+    await message.reply_text(welcome_text, reply_markup=keyboard)
 
-📁 **File Name:** `{file_name}`
-📦 **File Size:** {self.format_size(file_size)}
-🔗 **Download Link:** [Click Here]({download_url})
+@app.on_message(filters.command("premium"))
+async def premium_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    if is_premium_user(user_id):
+        user_data = premium_users[str(user_id)]
+        expiry_date = user_data.get('expiry_date', 'Lifetime')
+        await message.reply_text(
+            f"✅ **You are a Premium User!**\n"
+            f"📅 Expiry: {expiry_date}\n"
+            f"Enjoy all premium features!"
+        )
+        return
+    
+    premium_text = f"""
+💎 **Get Premium Access**
 
-**Link valid for 7 days**
-**Verification:** {config.VERIFICATION_URL}
-                """
-                
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📥 Download File", url=download_url)],
-                    [InlineKeyboardButton("🔗 Get Verification", url=config.VERIFICATION_URL)]
-                ])
-                
-                await status_msg.edit_text(
-                    success_text, 
-                    reply_markup=keyboard,
-                    disable_web_page_preview=True
-                )
-                
-                logger.info(f"✅ File uploaded successfully: {file_name}")
-            
-            # Cleanup
-            await self.cleanup_file(file_path)
-            
-        except Exception as e:
-            logger.error(f"❌ Error handling file upload: {e}")
-            await message.reply_text("❌ Error processing file. Please try again.")
-    
-    async def handle_photo_upload(self, message: Message):
-        """Handle photo uploads"""
-        try:
-            photo = message.photo
-            file_size = photo.file_size
-            file_name = f"photo_{message.id}.jpg"
-            
-            status_msg = await message.reply_text(
-                f"📥 **Downloading Photo...**\n"
-                f"📁 Name: `{file_name}`\n" 
-                f"📦 Size: {self.format_size(file_size)}\n"
-                f"⏳ Status: Starting..."
-            )
-            
-            # Download photo
-            file_path = await message.download(file_name=f"temp/{file_name}")
-            
-            # Upload to Wasabi
-            download_url = await self.upload_to_wasabi(file_path, file_name, status_msg)
-            
-            if download_url:
-                success_text = f"""
-✅ **Photo Uploaded Successfully!**
+**Price:** ₹{Config.PREMIUM_PRICE}
+**Payment Method:** GPay/UPI
 
-📁 **File Name:** `{file_name}`
-📦 **File Size:** {self.format_size(file_size)}
-🔗 **Download Link:** [Click Here]({download_url})
+**UPI ID:** `{Config.GPAY_UPI_ID}`
 
-**Link valid for 7 days**
-**Verification:** {config.VERIFICATION_URL}
-                """
-                
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📥 Download Photo", url=download_url)],
-                    [InlineKeyboardButton("🔗 Get Verification", url=config.VERIFICATION_URL)]
-                ])
-                
-                await status_msg.edit_text(
-                    success_text,
-                    reply_markup=keyboard,
-                    disable_web_page_preview=True
-                )
-            
-            # Cleanup
-            await self.cleanup_file(file_path)
-            
-        except Exception as e:
-            logger.error(f"❌ Error handling photo upload: {e}")
-            await message.reply_text("❌ Error processing photo.")
-    
-    async def download_file(self, message: Message, file, status_msg: Message) -> Optional[str]:
-        """Download file from Telegram"""
-        try:
-            file_name = getattr(file, 'file_name', 'file')
-            file_size = file.file_size
-            
-            def progress(current, total):
-                percent = (current / total) * 100
-                asyncio.create_task(
-                    status_msg.edit_text(
-                        f"📥 **Downloading File...**\n"
-                        f"📁 Name: `{file_name}`\n"
-                        f"📦 Size: {self.format_size(total)}\n"
-                        f"⏳ Progress: {percent:.1f}%"
-                    )
-                )
-            
-            # Create temp directory
-            os.makedirs("temp", exist_ok=True)
-            
-            file_path = await message.download(
-                file_name=f"temp/{file_name}",
-                progress=progress
-            )
-            
-            return file_path
-            
-        except Exception as e:
-            logger.error(f"❌ Download error: {e}")
-            await status_msg.edit_text("❌ Error downloading file")
-            return None
-    
-    async def upload_to_wasabi(self, file_path: str, file_name: str, status_msg: Message) -> Optional[str]:
-        """Upload file to Wasabi storage"""
-        try:
-            file_size = os.path.getsize(file_path)
-            
-            # Generate unique key
-            import uuid
-            file_ext = os.path.splitext(file_name)[1]
-            wasabi_key = f"telegram/{uuid.uuid4()}{file_ext}"
-            
-            await status_msg.edit_text(
-                f"☁️ **Uploading to Cloud...**\n"
-                f"📁 Name: `{file_name}`\n"
-                f"📦 Size: {self.format_size(file_size)}\n"
-                f"⏳ Progress: Starting..."
-            )
-            
-            # Upload file
-            self.wasabi_client.upload_file(
-                file_path,
-                config.WASABI_BUCKET,
-                wasabi_key,
-                ExtraArgs={'ACL': 'public-read'}
-            )
-            
-            # Generate download URL
-            download_url = self.wasabi_client.generate_presigned_url(
-                'get_object',
-                Params={'Bucket': config.WASABI_BUCKET, 'Key': wasabi_key},
-                ExpiresIn=604800  # 7 days
-            )
-            
-            return download_url
-            
-        except Exception as e:
-            logger.error(f"❌ Wasabi upload error: {e}")
-            await status_msg.edit_text("❌ Error uploading to cloud storage")
-            return None
-    
-    async def cleanup_file(self, file_path: str):
-        """Clean up temporary files"""
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception as e:
-            logger.warning(f"⚠️ Could not delete temp file: {e}")
-    
-    def format_size(self, size_bytes):
-        """Format file size in human readable format"""
-        if not size_bytes:
-            return "0 B"
-        
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size_bytes < 1024.0:
-                return f"{size_bytes:.2f} {unit}"
-            size_bytes /= 1024.0
-        return f"{size_bytes:.2f} TB"
-    
-    async def start(self):
-        """Start the bot"""
-        try:
-            logger.info("🚀 Starting Telegram Wasabi Bot...")
-            
-            await self.app.start()
-            
-            # Get bot info
-            me = await self.app.get_me()
-            logger.info(f"✅ Bot running as @{me.username}")
-            
-            # Start waiting for messages
-            await idle()
-            
-        except RPCError as e:
-            logger.error(f"❌ Telegram RPC Error: {e}")
-        except Exception as e:
-            logger.error(f"❌ Unexpected error: {e}")
-        finally:
-            await self.stop()
-    
-    async def stop(self):
-        """Stop the bot"""
-        try:
-            if self.app:
-                await self.app.stop()
-            logger.info("🛑 Bot stopped successfully")
-        except Exception as e:
-            logger.error(f"❌ Error stopping bot: {e}")
+**Instructions:**
+1. Send ₹{Config.PREMIUM_PRICE} to the UPI ID above
+2. Take a screenshot of payment
+3. Send the screenshot to admin for approval
+4. You'll be activated within minutes!
 
-def main():
-    """Main function to run the bot"""
+**Benefits:**
+• 4GB file upload support
+• High-speed downloads
+• Direct streaming links
+• Unlimited storage
+    """
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📸 Send Payment Proof", callback_data="send_payment")],
+        [InlineKeyboardButton("👨‍💻 Contact Admin", url="https://t.me/your_admin_username")]
+    ])
+    
+    await message.reply_text(premium_text, reply_markup=keyboard)
+
+@app.on_message(filters.command("upload"))
+async def upload_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    if not is_premium_user(user_id):
+        await message.reply_text(
+            "❌ **Premium Required**\n\n"
+            "You need premium access to upload files.\n"
+            "Use /premium to get premium features."
+        )
+        return
+    
+    if not message.reply_to_message or not message.reply_to_message.document:
+        await message.reply_text(
+            "📤 **How to Upload:**\n\n"
+            "Reply to a file with /upload command\n"
+            "Example: Reply to a file and type `/upload`"
+        )
+        return
+    
+    await handle_file_upload(client, message.reply_to_message)
+
+async def handle_file_upload(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    if not message.document and not message.video and not message.audio:
+        await message.reply_text("❌ Please reply to a valid file (document, video, audio)")
+        return
+    
+    file = message.document or message.video or message.audio
+    file_size = file.file_size
+    
+    if file_size > Config.MAX_FILE_SIZE:
+        await message.reply_text(
+            f"❌ File too large! Maximum size is 4GB.\n"
+            f"Your file: {file_size / (1024**3):.2f}GB"
+        )
+        return
+    
+    # Generate unique file name
+    file_extension = os.path.splitext(file.file_name)[1] if hasattr(file, 'file_name') else ".bin"
+    unique_filename = f"{user_id}/{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.file_id}{file_extension}"
+    
+    status_msg = await message.reply_text("📤 Starting upload...")
+    
     try:
-        # Create temp directory
-        os.makedirs("temp", exist_ok=True)
+        # Download file with progress
+        download_path = await download_file_with_progress(client, message, status_msg)
         
-        # Initialize and run bot
-        bot = TelegramWasabiBot()
+        if not download_path:
+            await status_msg.edit_text("❌ Download failed!")
+            return
         
-        # Run the bot
-        asyncio.run(bot.start())
+        # Upload to Wasabi with progress
+        await upload_to_wasabi_with_progress(download_path, unique_filename, status_msg)
         
-    except KeyboardInterrupt:
-        logger.info("⏹️ Bot stopped by user")
+        # Generate download URL
+        download_url = generate_download_url(unique_filename)
+        
+        # Clean up local file
+        os.remove(download_path)
+        
+        # Send success message with download link
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Download Link", url=download_url)],
+            [InlineKeyboardButton("📤 Share", switch_inline_query=unique_filename)]
+        ])
+        
+        await status_msg.edit_text(
+            f"✅ **File Uploaded Successfully!**\n\n"
+            f"📁 File: `{unique_filename.split('/')[-1]}`\n"
+            f"💾 Size: {file_size / (1024**3):.2f}GB\n"
+            f"🔗 Direct Download Link Available",
+            reply_markup=keyboard
+        )
+        
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
+        await status_msg.edit_text(f"❌ Upload failed: {str(e)}")
+
+async def download_file_with_progress(client: Client, message: Message, status_msg: Message) -> str:
+    file = message.document or message.video or message.audio
+    file_name = file.file_name or f"file_{file.file_id}"
+    download_path = f"downloads/{file_name}"
+    
+    # Create downloads directory
+    os.makedirs("downloads", exist_ok=True)
+    
+    def progress(current, total):
+        percent = (current / total) * 100
+        asyncio.create_task(
+            status_msg.edit_text(
+                f"📥 Downloading...\n"
+                f"Progress: {current // (1024*1024)}MB / {total // (1024*1024)}MB\n"
+                f"({percent:.1f}%)"
+            )
+        )
+    
+    await client.download_media(message, file_name=download_path, progress=progress)
+    return download_path
+
+async def upload_to_wasabi_with_progress(file_path: str, s3_key: str, status_msg: Message):
+    file_size = os.path.getsize(file_path)
+    
+    def upload_progress(bytes_transferred):
+        percent = (bytes_transferred / file_size) * 100
+        asyncio.create_task(
+            status_msg.edit_text(
+                f"☁️ Uploading to Wasabi...\n"
+                f"Progress: {bytes_transferred // (1024*1024)}MB / {file_size // (1024*1024)}MB\n"
+                f"({percent:.1f}%)"
+            )
+        )
+    
+    # For large files, use multipart upload
+    if file_size > 100 * 1024 * 1024:  # 100MB
+        await multipart_upload(file_path, s3_key, upload_progress)
+    else:
+        s3_client.upload_file(
+            file_path, 
+            Config.WASABI_BUCKET, 
+            s3_key,
+            Callback=upload_progress
+        )
+
+async def multipart_upload(file_path: str, s3_key: str, progress_callback):
+    # Implement multipart upload for large files
+    transfer_config = boto3.s3.transfer.TransferConfig(
+        multipart_threshold=100 * 1024 * 1024,  # 100MB
+        max_concurrency=10,
+        multipart_chunksize=50 * 1024 * 1024  # 50MB
+    )
+    
+    s3_client.upload_file(
+        file_path,
+        Config.WASABI_BUCKET,
+        s3_key,
+        Config=transfer_config,
+        Callback=progress_callback
+    )
+
+def generate_download_url(s3_key: str) -> str:
+    """Generate presigned URL for download (valid for 1 week)"""
+    try:
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': Config.WASABI_BUCKET,
+                'Key': s3_key
+            },
+            ExpiresIn=604800  # 1 week
+        )
+        return url
+    except ClientError as e:
+        return f"Error generating URL: {str(e)}"
+
+@app.on_message(filters.command("myfiles"))
+async def my_files_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    if not is_premium_user(user_id):
+        await message.reply_text("❌ Premium access required!")
+        return
+    
+    try:
+        # List user's files from Wasabi
+        response = s3_client.list_objects_v2(
+            Bucket=Config.WASABI_BUCKET,
+            Prefix=f"{user_id}/"
+        )
+        
+        if 'Contents' not in response:
+            await message.reply_text("📭 No files found!")
+            return
+        
+        files_text = "📁 **Your Files:**\n\n"
+        for obj in response['Contents'][:10]:  # Show last 10 files
+            file_name = obj['Key'].split('/')[-1]
+            file_size = obj['Size'] / (1024*1024)  # MB
+            files_text += f"• `{file_name}` ({file_size:.1f}MB)\n"
+        
+        await message.reply_text(files_text)
+        
+    except Exception as e:
+        await message.reply_text(f"❌ Error fetching files: {str(e)}")
+
+# Admin commands
+@app.on_message(filters.command("addpremium") & filters.user(Config.ADMIN_IDS))
+async def add_premium_command(client: Client, message: Message):
+    if len(message.command) < 2:
+        await message.reply_text("Usage: /addpremium <user_id> [days]")
+        return
+    
+    try:
+        target_user_id = int(message.command[1])
+        days = int(message.command[2]) if len(message.command) > 2 else 30
+        
+        expiry_date = datetime.now().timestamp() + (days * 24 * 60 * 60)
+        
+        premium_users[str(target_user_id)] = {
+            'added_by': message.from_user.id,
+            'added_date': datetime.now().isoformat(),
+            'expiry_date': expiry_date,
+            'days': days
+        }
+        
+        save_premium_users(premium_users)
+        
+        await message.reply_text(
+            f"✅ Premium added for user {target_user_id}\n"
+            f"Duration: {days} days"
+        )
+        
+        # Notify user
+        try:
+            await client.send_message(
+                target_user_id,
+                f"🎉 **Premium Activated!**\n\n"
+                f"Your premium access has been activated for {days} days!\n"
+                f"You can now upload files up to 4GB."
+            )
+        except:
+            pass
+            
+    except Exception as e:
+        await message.reply_text(f"Error: {str(e)}")
+
+@app.on_message(filters.command("userstats") & filters.user(Config.ADMIN_IDS))
+async def user_stats_command(client: Client, message: Message):
+    stats_text = f"📊 **Bot Statistics**\n\n"
+    stats_text += f"👥 Total Premium Users: {len(premium_users)}\n"
+    
+    # Count active premium users
+    active_users = 0
+    for user_id, user_data in premium_users.items():
+        expiry = user_data.get('expiry_date', 0)
+        if expiry > datetime.now().timestamp():
+            active_users += 1
+    
+    stats_text += f"✅ Active Premium Users: {active_users}\n"
+    
+    await message.reply_text(stats_text)
+
+# Callback query handlers
+@app.on_callback_query()
+async def handle_callbacks(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    data = callback_query.data
+    
+    if data == "get_premium":
+        await premium_command(client, callback_query.message)
+    
+    elif data == "upload_help":
+        await callback_query.message.edit_text(
+            "📤 **How to Upload Files:**\n\n"
+            "1. Make sure you have premium access\n"
+            "2. Send any file to the bot\n"
+            "3. Reply to that file with /upload command\n"
+            "4. Wait for upload to complete\n"
+            "5. Get your direct download link!"
+        )
+    
+    elif data == "my_files":
+        await my_files_command(client, callback_query.message)
+    
+    elif data == "send_payment":
+        await callback_query.message.edit_text(
+            "📸 **Send Payment Proof**\n\n"
+            "Please send the payment screenshot directly to this chat.\n"
+            "Our admin will verify and activate your premium within minutes."
+        )
+    
+    await callback_query.answer()
+
+# Handle payment proof photos
+@app.on_message(filters.photo & ~filters.user(Config.ADMIN_IDS))
+async def handle_payment_proof(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    # Check if user is already premium
+    if is_premium_user(user_id):
+        await message.reply_text("✅ You already have premium access!")
+        return
+    
+    # Forward to admin for approval
+    for admin_id in Config.ADMIN_IDS:
+        try:
+            await client.send_message(
+                admin_id,
+                f"🤑 **New Payment Proof**\n\n"
+                f"👤 User: {message.from_user.mention}\n"
+                f"🆔 ID: `{user_id}`\n\n"
+                f"Please verify and use /addpremium {user_id} to activate premium."
+            )
+            await client.forward_messages(admin_id, message.chat.id, message.id)
+        except:
+            pass
+    
+    await message.reply_text(
+        "✅ Payment proof received!\n"
+        "Admin has been notified. Your premium will be activated shortly."
+    )
 
 if __name__ == "__main__":
-    main()
+    print("🤖 Bot is starting...")
+    # Create necessary directories
+    os.makedirs("downloads", exist_ok=True)
+    app.run()
