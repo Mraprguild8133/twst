@@ -24,23 +24,31 @@ def admin_filter(_, __, m: Message):
 
 admin_only = filters.create(admin_filter)
 
-# --- STARTUP FUNCTION ---
-async def startup():
-    """Initialize bot on startup"""
+# --- STARTUP HOOK USING on_message ---
+@app.on_message(filters.command("init") & filters.private)
+async def initialize_bot(client: Client, message: Message):
+    """Initialize bot when first message is received"""
     global bot_username
-    await app.start()
-    me = await app.get_me()
-    bot_username = me.username
-    config.BOT_USERNAME = bot_username
-    print(f"🤖 Bot started as @{bot_username}")
-    print(f"💾 Storage Chat: {config.STORAGE_CHAT_ID}")
-    print(f"👑 Admins: {len(config.ADMIN_IDS)}")
+    if bot_username is None:
+        me = await client.get_me()
+        bot_username = me.username
+        config.BOT_USERNAME = bot_username
+        print(f"🤖 Bot initialized as @{bot_username}")
 
 # --- HANDLERS ---
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
     """Handles the /start command with file ID parameter for direct downloads"""
+    global bot_username
+    
+    # Initialize bot if not already done
+    if bot_username is None:
+        me = await client.get_me()
+        bot_username = me.username
+        config.BOT_USERNAME = bot_username
+        print(f"🤖 Bot initialized as @{bot_username}")
+    
     user_id = message.from_user.id
     args = message.command
     
@@ -119,10 +127,18 @@ async def handle_quick_download(client: Client, message: Message, storage_id: in
 @app.on_message(filters.document | filters.video | filters.audio, group=1)
 async def handle_file_upload(client: Client, message: Message):
     """Handles file uploads and provides multiple sharing options"""
+    global bot_username
+    
     user_id = message.from_user.id
     if user_id not in config.ADMIN_IDS:
         await message.reply_text("🚫 Access Denied. Only administrators can upload files.")
         return
+
+    # Initialize bot if not already done
+    if bot_username is None:
+        me = await client.get_me()
+        bot_username = me.username
+        config.BOT_USERNAME = bot_username
 
     # Check file size
     file_size = (
@@ -232,9 +248,17 @@ async def handle_file_download(client: Client, message: Message):
 @app.on_message(filters.command("link") & admin_only)
 async def generate_download_link(client: Client, message: Message):
     """Generate shareable download links"""
+    global bot_username
+    
     if len(message.command) < 2:
         await message.reply_text("Usage: `/link <storage_id>`\nExample: `/link 12345`")
         return
+
+    # Initialize bot if not already done
+    if bot_username is None:
+        me = await client.get_me()
+        bot_username = me.username
+        config.BOT_USERNAME = bot_username
 
     try:
         storage_id = int(message.command[1].strip())
@@ -264,9 +288,17 @@ async def generate_download_link(client: Client, message: Message):
 @app.on_message(filters.command("info") & admin_only)
 async def file_info(client: Client, message: Message):
     """Get information about a stored file"""
+    global bot_username
+    
     if len(message.command) < 2:
         await message.reply_text("Usage: `/info <storage_id>`")
         return
+
+    # Initialize bot if not already done
+    if bot_username is None:
+        me = await client.get_me()
+        bot_username = me.username
+        config.BOT_USERNAME = bot_username
 
     try:
         storage_id = int(message.command[1].strip())
@@ -310,7 +342,16 @@ async def file_info(client: Client, message: Message):
 @app.on_callback_query(filters.regex("^link_"))
 async def generate_link_callback(client, callback_query):
     """Generate link from callback"""
+    global bot_username
+    
     storage_id = callback_query.data.replace("link_", "")
+    
+    # Initialize bot if not already done
+    if bot_username is None:
+        me = await client.get_me()
+        bot_username = me.username
+        config.BOT_USERNAME = bot_username
+
     encoded_id = base64.b64encode(str(storage_id).encode()).decode()
     direct_link = f"https://t.me/{bot_username}?start=file_{encoded_id}"
     
@@ -330,6 +371,14 @@ async def generate_link_callback(client, callback_query):
 @app.on_message(filters.command("stats") & admin_only)
 async def bot_stats(client: Client, message: Message):
     """Show bot statistics"""
+    global bot_username
+    
+    # Initialize bot if not already done
+    if bot_username is None:
+        me = await client.get_me()
+        bot_username = me.username
+        config.BOT_USERNAME = bot_username
+
     try:
         stats_text = (
             f"**📊 Bot Statistics**\n\n"
@@ -351,10 +400,9 @@ async def bot_stats(client: Client, message: Message):
 # --- BOT STARTUP ---
 if __name__ == "__main__":
     print("🚀 Starting Enhanced File Store Bot...")
-    
-    # Run startup and then start the bot
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(startup())
-    
+    print(f"💾 Storage Chat: {config.STORAGE_CHAT_ID}")
+    print(f"👑 Admins: {len(config.ADMIN_IDS)}")
     print("✅ Bot is running...")
+    
+    # Simply run the bot - initialization happens in message handlers
     app.run()
