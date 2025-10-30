@@ -20,6 +20,7 @@ class Config:
         # Optional settings with defaults
         self.MAX_FILE_SIZE = int(os.environ.get('MAX_FILE_SIZE', 2000))  # in MB
         self.ALLOWED_FILE_TYPES = os.environ.get('ALLOWED_FILE_TYPES', 'document,video,audio').split(',')
+        self.BOT_USERNAME = None  # Will be set dynamically
         
     def validate(self):
         """Validate required configuration"""
@@ -27,7 +28,6 @@ class Config:
             raise ValueError("At least one ADMIN_ID must be specified")
         if not self.STORAGE_CHAT_ID:
             raise ValueError("STORAGE_CHAT_ID must be specified")
-        
         return self
 
 # Create global config instance
