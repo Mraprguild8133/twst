@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 # Configuration from environment variables (for Render)
 class Config:
     BOT_TOKEN = os.environ.get('BOT_TOKEN')
-    BITLY_TOKEN = os.environ.get('BITLY_TOKEN', '')
-    CUTTLY_API = os.environ.get('CUTTLY_API', '')
+    SHRINKEARN_API = os.environ.get('SHRINKEARN_API', '')
+    SHRTFLY_API = os.environ.get('SHRTFLY_API', '')
+    FCLC_API = os.environ.get('FCLC_API', '')
     GPLINKS_API = os.environ.get('GPLINKS_API', '')
     USE_WEBHOOK = os.environ.get('USE_WEBHOOK', 'true').lower() == 'true'
     WEBHOOK_PORT = int(os.environ.get('PORT', 5000))
