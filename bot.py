@@ -1,269 +1,370 @@
-# main.py
 import os
 import re
-import asyncio
-import time
-import tempfile
-import pathlib
-import aiohttp
-import aiofiles
+import requests
+import logging
+from urllib.parse import urlparse
 
-from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, RPCError
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
+# --- 1. CONFIGURATION: IMPORT SETTINGS ---
 from config import config
-from torrent_services import TorrentServiceManager
 
-# --- Initialize Services ---
-service_manager = TorrentServiceManager()
-
-# --- Regex Patterns ---
-TORRENT_REGEX = re.compile(
-    r'(magnet:\?xt=urn:[a-z0-9]+:([a-z0-9]{32,40})&dn=|http[s]?://[^\s]*\.torrent)',
-    re.IGNORECASE
+# --- 2. BOT SETUP AND LOGGING ---
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
 )
 
-# --- Pyrogram Client ---
-if not config.validate():
-    print("FATAL: Missing one or more required environment variables (API_ID, API_HASH, BOT_TOKEN).")
-    exit(1)
-
-app = Client(
-    config.SESSION_NAME,
-    api_id=config.API_ID,
-    api_hash=config.API_HASH,
-    bot_token=config.BOT_TOKEN,
-    workers=10
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
-# --- Utility Functions ---
+# Conversation states
+GET_URL, SELECT_SERVICE = range(2)
 
-def human_readable_bytes(size: int) -> str:
-    """Converts bytes to a human-readable string."""
-    units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
-    unit_index = 0
-    while size >= 1024 and unit_index < len(units) - 1:
-        size /= 1024
-        unit_index += 1
-    return f"{size:.2f} {units[unit_index]}"
+# --- 3. UTILITY FUNCTIONS ---
 
-def format_time(seconds: int) -> str:
-    """Format seconds into human readable time"""
-    if seconds < 60:
-        return f"{seconds}s"
-    elif seconds < 3600:
-        return f"{seconds // 60}m {seconds % 60}s"
-    else:
-        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+def is_valid_url(url: str) -> bool:
+    """Enhanced URL validation with regex"""
+    pattern = re.compile(
+        r'^https?://'  # http:// or https://
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domain...
+        r'localhost|'  # localhost...
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
+        r'(?::\d+)?'  # optional port
+        r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+    return re.match(pattern, url) is not None
 
-# --- Progress Callback ---
+def normalize_url(url: str) -> str:
+    """Normalize URL by adding scheme if missing"""
+    if not url.startswith(('http://', 'https://')):
+        return f'https://{url}'
+    return url
 
-async def progress_callback(current: int, total: int, client: Client, message, start_time: float):
+# --- 4. API INTEGRATION FUNCTIONS ---
+
+def shorten_link_api(service_key: str, long_url: str) -> str:
     """
-    Asynchronous callback function to update the user on the upload progress.
+    Calls the external URL shortening API and returns the short link or an error message.
     """
-    elapsed = time.time() - start_time
-    if elapsed == 0:
-        elapsed = 0.1
-
-    speed = current / elapsed
-    percentage = current * 100 / total
+    api_key = config.API_KEYS.get(service_key)
+    api_url = config.SERVICE_ENDPOINTS.get(service_key)
     
-    # Update every 3 seconds or when complete
-    if (current == total) or (int(elapsed) % 3 == 0 and current > 0):
-        try:
-            # Create progress bar
-            bar_length = 10
-            filled_length = int(bar_length * current // total)
-            bar = '█' * filled_length + '░' * (bar_length - filled_length)
-            
-            # Calculate ETA
-            if current > 0 and speed > 0:
-                remaining = (total - current) / speed
-                eta = format_time(int(remaining))
-            else:
-                eta = "Calculating..."
-            
-            upload_status = (
-                f"**📤 Uploading File...**\n\n"
-                f"**Progress:** `[{bar}] {percentage:.1f}%`\n"
-                f"**Size:** `{human_readable_bytes(current)} / {human_readable_bytes(total)}`\n"
-                f"**Speed:** `{human_readable_bytes(speed)}/s`\n"
-                f"**Time Elapsed:** `{format_time(int(elapsed))}`\n"
-                f"**ETA:** `{eta}`"
-            )
-            
-            await message.edit_text(upload_status)
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-        except Exception as e:
-            print(f"Progress update error: {e}")
+    # Check if the API key is still the unconfigured placeholder
+    if api_key in config.PLACEHOLDER_KEYS:
+        return "⚠️ API Key not configured for this service in config.py. Please update it."
 
-# --- Bot Handlers ---
+    if not api_key or not api_url:
+        return f"⚠️ Error: Service configuration for '{service_key}' is incomplete."
 
-@app.on_message(filters.command("start"))
-async def start_command(client: Client, message):
-    """Handle /start command"""
-    if not config.is_user_allowed(message.from_user.id):
-        await message.reply_text("❌ You are not authorized to use this bot.")
-        return
-        
-    welcome_text = (
-        "🤖 **Torrent Converter Bot**\n\n"
-        "Send me a **magnet link** or **torrent URL** and I'll download and upload it to Telegram.\n\n"
-        "**Features:**\n"
-        "• Support for large files (4GB+)\n"
-        "• Real-time progress updates\n"
-        "• Multiple download services\n"
-        "• Fast cloud downloading\n\n"
-        "**Just send me a torrent link to get started!**"
-    )
+    # Service-specific API parameters
+    service_configs = {
+        'gplinks': {
+            'params': {'api': api_key, 'url': long_url, 'format': 'json'},
+            'success_key': 'shortenedUrl',
+            'error_key': 'message'
+        },
+        'shrinkearn': {
+            'params': {'api': api_key, 'url': long_url},
+            'success_key': 'shortenedUrl',
+            'error_key': 'error'
+        },
+        'shrtfly': {
+            'params': {'api': api_key, 'url': long_url, 'format': 'text'},
+            'success_key': 'shortenedUrl', 
+            'error_key': 'message'
+        },
+        'fclc': {
+            'params': {'api': api_key, 'url': long_url},
+            'success_key': 'shortenedUrl',
+            'error_key': 'error'
+        }
+    }
     
-    await message.reply_text(welcome_text)
-
-@app.on_message(filters.command("help"))
-async def help_command(client: Client, message):
-    """Handle /help command"""
-    help_text = (
-        "**📖 How to use this bot:**\n\n"
-        "1. Send a **magnet link** (starts with `magnet:?xt=urn:`)\n"
-        "2. Or send a **.torrent file URL**\n"
-        "3. The bot will download and upload the file to Telegram\n\n"
-        "**Supported formats:**\n"
-        "• Magnet links\n"
-        "• Direct .torrent URLs\n\n"
-        "**Note:** Large files may take time to upload. Please be patient!"
-    )
-    
-    await message.reply_text(help_text)
-
-@app.on_message(filters.private & filters.text)
-async def handle_torrent_link(client: Client, message):
-    """
-    Handles incoming messages with torrent links
-    """
-    # Check user authorization
-    if not config.is_user_allowed(message.from_user.id):
-        await message.reply_text("❌ You are not authorized to use this bot.")
-        return
-    
-    link = message.text.strip()
-    
-    # Check if it's a torrent link
-    if not TORRENT_REGEX.match(link):
-        await message.reply_text(
-            "❌ Please send a valid **magnet link** or **torrent URL**.\n"
-            "Use /help for more information."
-        )
-        return
-
-    # Start processing
-    status_message = await message.reply_text("🔎 Analyzing torrent link...")
+    config_data = service_configs.get(service_key, {})
+    params = config_data.get('params', {})
+    success_key = config_data.get('success_key', 'shortenedUrl')
+    error_key = config_data.get('error_key', 'message')
     
     try:
-        # Step 1: Download torrent via service manager
-        await status_message.edit_text("🔄 Starting download process...")
+        # Use a timeout to prevent the bot from hanging
+        response = requests.get(api_url, params=params, timeout=15)
+        response.raise_for_status()
         
-        downloaded_file_path = await service_manager.download_torrent(link, status_message)
-        
-        if not downloaded_file_path:
-            await status_message.edit_text("❌ Failed to download torrent. Please try again later.")
-            return
+        # Handle different response formats
+        if params.get('format') == 'text':
+            short_url = response.text.strip()
+            if short_url and short_url.startswith('http'):
+                return short_url
+            else:
+                return f"❌ API returned invalid URL: {short_url}"
+        else:
+            data = response.json()
+            
+            # Check for success and the shortened URL in the response
+            if data.get('status') in ['success', 'ok'] and data.get(success_key):
+                return data[success_key]
+            elif data.get(error_key):
+                return f"❌ API Error: {data[error_key]}"
+            else:
+                return "❌ API Response Error: Could not parse the short link from the service."
 
-        # Step 2: Prepare for upload
-        file_stats = pathlib.Path(downloaded_file_path).stat()
-        file_size = file_stats.st_size
-        
-        if file_size > config.MAX_FILE_SIZE:
-            await status_message.edit_text(
-                f"❌ File too large ({human_readable_bytes(file_size)}). "
-                f"Maximum allowed size is {human_readable_bytes(config.MAX_FILE_SIZE)}."
-            )
-            os.remove(downloaded_file_path)
-            return
-
-        filename = os.path.basename(downloaded_file_path)
-        start_time = time.time()
-
-        # Step 3: Upload with progress
-        await status_message.edit_text(
-            f"**📤 Ready to Upload**\n\n"
-            f"**File:** `{filename}`\n"
-            f"**Size:** `{human_readable_bytes(file_size)}`\n"
-            f"**Starting upload...**"
-        )
-
-        await client.send_document(
-            chat_id=message.chat.id,
-            document=downloaded_file_path,
-            file_name=filename,
-            caption=(
-                f"✅ **Download Complete!**\n\n"
-                f"**File:** `{filename}`\n"
-                f"**Size:** `{human_readable_bytes(file_size)}`\n"
-                f"**Converted from torrent link**"
-            ),
-            progress=progress_callback,
-            progress_args=(client, status_message, start_time)
-        )
-
-        # Final success message
-        total_time = int(time.time() - start_time)
-        await status_message.edit_text(
-            f"✅ **Upload Complete!**\n\n"
-            f"**File:** `{filename}`\n"
-            f"**Size:** `{human_readable_bytes(file_size)}`\n"
-            f"**Total Time:** `{format_time(total_time)}`"
-        )
-
-    except FloodWait as e:
-        await status_message.edit_text(f"⏳ Too many requests. Please wait {e.value} seconds and try again.")
-    except RPCError as e:
-        await status_message.edit_text(f"❌ Telegram API error: {str(e)}")
+    except requests.exceptions.Timeout:
+        logger.error(f"API Request timeout for {service_key}")
+        return f"❌ Timeout Error: {service_key.upper()} service is taking too long to respond."
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API Request failed for {service_key}: {e}")
+        return f"❌ Network Error: Could not connect to {service_key.upper()}. Try again later."
+    except ValueError as e:
+        logger.error(f"JSON parsing error for {service_key}: {e}")
+        return f"❌ API Response Error: Invalid response format from {service_key.upper()}."
     except Exception as e:
-        await status_message.edit_text(f"❌ Unexpected error: {str(e)}")
-        print(f"Error in handle_torrent_link: {e}")
-    finally:
-        # Cleanup
-        if 'downloaded_file_path' in locals() and downloaded_file_path and os.path.exists(downloaded_file_path):
-            try:
-                os.remove(downloaded_file_path)
-                temp_dir = os.path.dirname(downloaded_file_path)
-                if temp_dir.startswith(tempfile.gettempdir()):
-                    os.rmdir(temp_dir)
-            except Exception as e:
-                print(f"Cleanup error: {e}")
+        logger.error(f"Unexpected error during API call to {service_key}: {e}")
+        return "❌ An unexpected error occurred."
 
-@app.on_message(filters.private & filters.document)
-async def handle_direct_upload(client: Client, message):
-    """Handle direct .torrent file uploads"""
-    if not config.is_user_allowed(message.from_user.id):
+# --- 5. TELEGRAM HANDLERS ---
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Sends a welcome message and initiates the shortening conversation."""
+    user = update.effective_user
+    welcome_message = (
+        f"👋 Welcome, {user.first_name}! I am your Mraprguild URL Shortener Bot.\n\n"
+        "I can shorten links using four services: **GPLinks**, **ShrinkEarn**, **ShrtFly**, and **FC.LC**.\n\n"
+        "To begin, type /shorten or click the button below.\n\n"
+        "Available commands:\n"
+        "• /start - Start the bot\n"
+        "• /shorten - Shorten a new URL\n" 
+        "• /help - Show help information\n"
+        "• /cancel - Cancel current operation"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔗 Shorten URL", callback_data="start_shorten")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
+    return ConversationHandler.END
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help information."""
+    help_text = (
+        "🤖 **URL Shortener Bot Help**\n\n"
+        "**How to use:**\n"
+        "1. Use /shorten to start\n"
+        "2. Send me the long URL you want to shorten\n"
+        "3. Choose your preferred shortening service\n"
+        "4. Get your shortened link!\n\n"
+        "**Supported Services:**\n"
+        "• GPLinks (gplinks.in)\n"
+        "• ShrinkEarn (shrinkearn.com)\n" 
+        "• ShrtFly (shrtfly.com)\n"
+        "• FC.LC (fc.lc)\n\n"
+        "**Notes:**\n"
+        "• URLs must start with http:// or https://\n"
+        "• Some services may require authentication\n"
+        "• Use /cancel anytime to stop current operation"
+    )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def shorten_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the conversation and prompts the user for the URL."""
+    # Clear any previous user data
+    context.user_data.clear()
+    
+    await update.message.reply_text(
+        "🔗 Please send me the **long URL** you wish to shorten.\n\n"
+        "Example: `https://example.com/very/long/url/path`",
+        parse_mode='Markdown'
+    )
+    return GET_URL
+
+async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives the URL from the user and presents the service options."""
+    long_url = update.message.text.strip()
+    
+    # Normalize URL (add https:// if missing)
+    normalized_url = normalize_url(long_url)
+    
+    # Enhanced URL validation
+    if not is_valid_url(normalized_url):
+        await update.message.reply_text(
+            "❌ That doesn't look like a valid URL. Please send a valid URL starting with `http://` or `https://`.\n\n"
+            "Example: `https://example.com`",
+            parse_mode='Markdown'
+        )
+        return GET_URL
+
+    # Store the normalized URL in user data
+    context.user_data['long_url'] = normalized_url
+    
+    # Create the inline keyboard with service options
+    keyboard = [
+        [InlineKeyboardButton("🔗 GPLinks", callback_data='service_gplinks')],
+        [InlineKeyboardButton("🔗 ShrinkEarn", callback_data='service_shrinkearn')],
+        [InlineKeyboardButton("🔗 ShrtFly", callback_data='service_shrtfly')],
+        [InlineKeyboardButton("🔗 FC.LC", callback_data='service_fclc')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"✅ URL received: `{normalized_url}`\n\n"
+        "Now, please select the **shortening service** you want to use:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+    return SELECT_SERVICE
+
+async def select_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the user's service selection via inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    service_data = query.data.replace('service_', '')
+    long_url = context.user_data.get('long_url')
+    
+    if not long_url:
+        await query.edit_message_text(
+            "❌ Error: I lost the original URL. Please start again with /shorten."
+        )
+        return ConversationHandler.END
+
+    # Get the service name for display
+    service_names = {
+        'gplinks': 'GPLinks', 
+        'shrinkearn': 'ShrinkEarn', 
+        'shrtfly': 'ShrtFly', 
+        'fclc': 'FC.LC'
+    }
+    display_name = service_names.get(service_data, service_data.upper())
+
+    # Update the message to show processing
+    processing_message = await query.edit_message_text(
+        f"⏳ Shortening your link using **{display_name}**...\n\n"
+        f"URL: `{long_url}`",
+        parse_mode='Markdown'
+    )
+
+    # Call the API function
+    short_link = shorten_link_api(service_data, long_url)
+
+    # Prepare response based on result
+    if short_link.startswith("http"):
+        # Success case
+        response_text = (
+            f"✨ **Shortening Complete!** ✨\n\n"
+            f"**Service:** {display_name}\n"
+            f"**Original URL:** `{long_url}`\n"
+            f"**Short Link:** `{short_link}`\n\n"
+            f"✅ You can copy and share the link above.\n"
+            f"Use /shorten to shorten another link."
+        )
+    else:
+        # Error case
+        response_text = (
+            f"❌ **Shortening Failed** ❌\n\n"
+            f"**Service:** {display_name}\n"
+            f"**Error Details:** {short_link}\n\n"
+            f"Please check your API key for {display_name} and try again, "
+            f"or select a different service."
+        )
+
+    await query.edit_message_text(
+        response_text,
+        parse_mode='Markdown',
+        disable_web_page_preview=True
+    )
+
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels and ends the conversation."""
+    context.user_data.clear()
+    await update.message.reply_text(
+        '❌ Operation cancelled. Use /shorten to start a new one.'
+    )
+    return ConversationHandler.END
+
+async def fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback handler for text messages not during the conversation flow."""
+    await update.message.reply_text(
+        "🤖 I'm designed to shorten links. Use the /shorten command to start the process "
+        "or /help for more information."
+    )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses."""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "start_shorten":
+        return await shorten_command(update, context)
+
+# --- 6. MAIN EXECUTION ---
+
+def main() -> None:
+    """Start the bot."""
+    # Check for the main Telegram bot token
+    if config.TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+        logger.error("🚨 FATAL: Please set TELEGRAM_BOT_TOKEN environment variable or update config.py")
         return
+
+    # Create the Application
+    application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+
+    # Add command handlers
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("start", start))
+    
+    # The conversation handler manages the state flow
+    shorten_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("shorten", shorten_command),
+            CallbackQueryHandler(button_handler, pattern="^start_shorten$")
+        ],
         
-    if message.document and message.document.file_name and message.document.file_name.endswith('.torrent'):
-        await message.reply_text("📥 .torrent file received! Processing...\n\n*Note: Direct .torrent file processing requires additional setup.*")
+        states={
+            GET_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url)
+            ],
+            SELECT_SERVICE: [
+                CallbackQueryHandler(select_service, pattern='^service_'),
+                CommandHandler('cancel', cancel)
+            ],
+        },
+        
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
-# --- Error Handler ---
+    application.add_handler(shorten_conv_handler)
+    
+    # Add a catch-all handler for text messages outside the conversation
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_handler))
+    
+    # Add callback query handler for buttons
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^start_shorten$"))
 
-@app.on_error()
-async def error_handler(_, update, error):
-    """Global error handler"""
-    print(f"Error in update {update}: {error}")
-    # You can add specific error handling logic here
-
-# --- Main Execution ---
+    # Run the bot
+    logger.info("Bot is starting...")
+    print("🤖 URL Shortener Bot is running! Press Ctrl+C to stop.")
+    
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.error(f"Bot crashed: {e}")
+    finally:
+        logger.info("Bot stopped")
 
 if __name__ == "__main__":
-    print("🤖 Torrent Converter Bot Starting...")
-    print(f"API ID: {config.API_ID} | Bot Token: {config.BOT_TOKEN[:10]}...")
-    print(f"Max File Size: {human_readable_bytes(config.MAX_FILE_SIZE)}")
-    print(f"Allowed Users: {config.ALLOWED_USER_IDS if config.ALLOWED_USER_IDS else 'All'}")
-    print("Bot is running. Press Ctrl+C to stop.")
-    
-    try:
-        app.run()
-    except KeyboardInterrupt:
-        print("\nBot stopped by user.")
-    except Exception as e:
-        print(f"Fatal error: {e}")
+    main()
