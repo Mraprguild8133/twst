@@ -2,6 +2,7 @@ import logging
 import requests
 import time
 from io import BytesIO
+from collections import defaultdict
 from telegram import Update, constants
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
