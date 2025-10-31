@@ -1,11 +1,14 @@
 import os
 
 class Config:
-    BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-    GPLINKS_API = os.environ.get('GPLINKS_API', '')
-    SHRINKEARN_API = os.environ.get('SHRINKEARN_API', '')
-    SHRTFLY_API = os.environ.get('SHRTFLY_API', '')
-    FCLC_API = os.environ.get('FCLC_API', '')
+    BOT_TOKEN = os.environ.get('BOT_TOKEN')
+    
+    # URL Shortening Service API Keys
+    GPLINKS_API = os.environ.get('GPLINKS_API', 'your_gplinks_api_key_here')
+    SHRINKEARN_API = os.environ.get('SHRINKEARN_API', 'your_shrinkearn_api_key_here')
+    SHRTFLY_API = os.environ.get('SHRTFLY_API', 'your_shrtfly_api_key_here')
+    FCLC_API = os.environ.get('FCLC_API', 'your_fclc_api_key_here')
+    
     USE_WEBHOOK = os.environ.get('USE_WEBHOOK', 'true').lower() == 'true'
     WEBHOOK_PORT = int(os.environ.get('PORT', 5000))
     WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')
