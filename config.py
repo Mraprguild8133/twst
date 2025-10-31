@@ -1,7 +1,7 @@
 import os
 
 class Config:
-    BOT_TOKEN = os.environ.get('BOT_TOKEN')
+    BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
     
     # URL Shortening Service API Keys
     GPLINKS_API = os.environ.get('GPLINKS_API', 'your_gplinks_api_key_here')
