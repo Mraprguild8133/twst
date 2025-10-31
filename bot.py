@@ -2,7 +2,9 @@ import os
 import re
 import requests
 import logging
+import asyncio
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
 
 # --- 1. CONFIGURATION: IMPORT SETTINGS ---
 from config import config
@@ -34,6 +36,9 @@ logger = logging.getLogger(__name__)
 # Conversation states
 GET_URL, SELECT_SERVICE = range(2)
 
+# Thread pool for parallel API calls
+executor = ThreadPoolExecutor(max_workers=5)
+
 # --- 3. UTILITY FUNCTIONS ---
 
 def is_valid_url(url: str) -> bool:
@@ -55,19 +60,31 @@ def normalize_url(url: str) -> str:
 
 # --- 4. API INTEGRATION FUNCTIONS ---
 
-def shorten_link_api(service_key: str, long_url: str) -> str:
+def shorten_link_api(service_key: str, long_url: str) -> dict:
     """
-    Calls the external URL shortening API and returns the short link or an error message.
+    Calls the external URL shortening API and returns result as dict.
+    Returns: {'success': bool, 'service': str, 'url': str, 'error': str}
     """
     api_key = config.API_KEYS.get(service_key)
     api_url = config.SERVICE_ENDPOINTS.get(service_key)
+    display_name = config.SERVICE_NAMES.get(service_key, service_key.upper())
     
     # Check if the API key is still the unconfigured placeholder
     if api_key in config.PLACEHOLDER_KEYS:
-        return "⚠️ API Key not configured for this service in config.py. Please update it."
+        return {
+            'success': False,
+            'service': display_name,
+            'url': None,
+            'error': "API Key not configured"
+        }
 
     if not api_key or not api_url:
-        return f"⚠️ Error: Service configuration for '{service_key}' is incomplete."
+        return {
+            'success': False,
+            'service': display_name, 
+            'url': None,
+            'error': "Service configuration incomplete"
+        }
 
     # Service-specific API parameters
     service_configs = {
@@ -107,32 +124,121 @@ def shorten_link_api(service_key: str, long_url: str) -> str:
         if params.get('format') == 'text':
             short_url = response.text.strip()
             if short_url and short_url.startswith('http'):
-                return short_url
+                return {
+                    'success': True,
+                    'service': display_name,
+                    'url': short_url,
+                    'error': None
+                }
             else:
-                return f"❌ API returned invalid URL: {short_url}"
+                return {
+                    'success': False,
+                    'service': display_name,
+                    'url': None,
+                    'error': f"Invalid URL returned: {short_url}"
+                }
         else:
             data = response.json()
             
             # Check for success and the shortened URL in the response
             if data.get('status') in ['success', 'ok'] and data.get(success_key):
-                return data[success_key]
+                return {
+                    'success': True,
+                    'service': display_name,
+                    'url': data[success_key],
+                    'error': None
+                }
             elif data.get(error_key):
-                return f"❌ API Error: {data[error_key]}"
+                return {
+                    'success': False,
+                    'service': display_name,
+                    'url': None,
+                    'error': data[error_key]
+                }
             else:
-                return "❌ API Response Error: Could not parse the short link from the service."
+                return {
+                    'success': False,
+                    'service': display_name,
+                    'url': None,
+                    'error': "Could not parse short link from response"
+                }
 
     except requests.exceptions.Timeout:
         logger.error(f"API Request timeout for {service_key}")
-        return f"❌ Timeout Error: {service_key.upper()} service is taking too long to respond."
+        return {
+            'success': False,
+            'service': display_name,
+            'url': None,
+            'error': "Service timeout"
+        }
     except requests.exceptions.RequestException as e:
         logger.error(f"API Request failed for {service_key}: {e}")
-        return f"❌ Network Error: Could not connect to {service_key.upper()}. Try again later."
+        return {
+            'success': False,
+            'service': display_name,
+            'url': None,
+            'error': f"Network error: {str(e)}"
+        }
     except ValueError as e:
         logger.error(f"JSON parsing error for {service_key}: {e}")
-        return f"❌ API Response Error: Invalid response format from {service_key.upper()}."
+        return {
+            'success': False,
+            'service': display_name,
+            'url': None,
+            'error': "Invalid response format"
+        }
     except Exception as e:
         logger.error(f"Unexpected error during API call to {service_key}: {e}")
-        return "❌ An unexpected error occurred."
+        return {
+            'success': False,
+            'service': display_name,
+            'url': None,
+            'error': f"Unexpected error: {str(e)}"
+        }
+
+async def shorten_all_services(long_url: str) -> list:
+    """Shorten URL using all services in parallel"""
+    services = ['gplinks', 'shrinkearn', 'shrtfly', 'fclc']
+    
+    # Run API calls in thread pool
+    loop = asyncio.get_event_loop()
+    tasks = [
+        loop.run_in_executor(executor, shorten_link_api, service, long_url)
+        for service in services
+    ]
+    
+    # Wait for all results
+    results = await asyncio.gather(*tasks)
+    return results
+
+def format_results_message(long_url: str, results: list) -> str:
+    """Format the results into a nice message"""
+    success_count = sum(1 for r in results if r['success'])
+    total_count = len(results)
+    
+    message = f"🔗 **URL Shortening Results** 🔗\n\n"
+    message += f"**Original URL:**\n`{long_url}`\n\n"
+    message += f"**Results:** {success_count}/{total_count} successful\n\n"
+    
+    # Add successful results
+    successful_services = [r for r in results if r['success']]
+    if successful_services:
+        message += "✅ **Shortened URLs:**\n"
+        for result in successful_services:
+            message += f"• **{result['service']}:** `{result['url']}`\n"
+        message += "\n"
+    
+    # Add failed results
+    failed_services = [r for r in results if not r['success']]
+    if failed_services:
+        message += "❌ **Failed Services:**\n"
+        for result in failed_services:
+            message += f"• **{result['service']}:** {result['error']}\n"
+        message += "\n"
+    
+    message += "💡 *You can copy and share any of the successful links above.*"
+    
+    return message
 
 # --- 5. TELEGRAM HANDLERS ---
 
@@ -142,6 +248,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     welcome_message = (
         f"👋 Welcome, {user.first_name}! I am your Mraprguild URL Shortener Bot.\n\n"
         "I can shorten links using four services: **GPLinks**, **ShrinkEarn**, **ShrtFly**, and **FC.LC**.\n\n"
+        "**New Feature:** Now you can generate shortened URLs from **ALL services** at once!\n\n"
         "To begin, type /shorten or click the button below.\n\n"
         "Available commands:\n"
         "• /start - Start the bot\n"
@@ -165,6 +272,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. Send me the long URL you want to shorten\n"
         "3. Choose your preferred shortening service\n"
         "4. Get your shortened link!\n\n"
+        "**✨ New Feature - All Services:**\n"
+        "• Select 'All Services' to generate shortened URLs from ALL services at once\n"
+        "• Get multiple links in one message\n"
+        "• See which services worked and which failed\n\n"
         "**Supported Services:**\n"
         "• GPLinks (gplinks.in)\n"
         "• ShrinkEarn (shrinkearn.com)\n" 
@@ -208,23 +319,91 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     # Store the normalized URL in user data
     context.user_data['long_url'] = normalized_url
     
-    # Create the inline keyboard with service options
+    # Create the inline keyboard with service options including "All Services"
     keyboard = [
         [InlineKeyboardButton("🔗 GPLinks", callback_data='service_gplinks')],
         [InlineKeyboardButton("🔗 ShrinkEarn", callback_data='service_shrinkearn')],
         [InlineKeyboardButton("🔗 ShrtFly", callback_data='service_shrtfly')],
         [InlineKeyboardButton("🔗 FC.LC", callback_data='service_fclc')],
+        [InlineKeyboardButton("🚀 ALL SERVICES", callback_data='service_all')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
         f"✅ URL received: `{normalized_url}`\n\n"
-        "Now, please select the **shortening service** you want to use:",
+        "Now, please select the **shortening service** you want to use:\n\n"
+        "💡 *Tip: Choose 'ALL SERVICES' to generate links from all services at once!*",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
     return SELECT_SERVICE
+
+async def process_single_service(service_data: str, long_url: str, query) -> int:
+    """Process a single service selection"""
+    display_name = config.SERVICE_NAMES.get(service_data, service_data.upper())
+
+    # Update the message to show processing
+    await query.edit_message_text(
+        f"⏳ Shortening your link using **{display_name}**...\n\n"
+        f"URL: `{long_url}`",
+        parse_mode='Markdown'
+    )
+
+    # Call the API function
+    result = shorten_link_api(service_data, long_url)
+
+    # Prepare response based on result
+    if result['success']:
+        response_text = (
+            f"✨ **Shortening Complete!** ✨\n\n"
+            f"**Service:** {display_name}\n"
+            f"**Original URL:** `{long_url}`\n"
+            f"**Short Link:** `{result['url']}`\n\n"
+            f"✅ You can copy and share the link above.\n"
+            f"Use /shorten to shorten another link."
+        )
+    else:
+        response_text = (
+            f"❌ **Shortening Failed** ❌\n\n"
+            f"**Service:** {display_name}\n"
+            f"**Error Details:** {result['error']}\n\n"
+            f"Please check your API key for {display_name} and try again, "
+            f"or select a different service."
+        )
+
+    await query.edit_message_text(
+        response_text,
+        parse_mode='Markdown',
+        disable_web_page_preview=True
+    )
+
+    return ConversationHandler.END
+
+async def process_all_services(long_url: str, query) -> int:
+    """Process all services in parallel"""
+    # Update the message to show processing
+    processing_message = await query.edit_message_text(
+        f"🚀 **Generating URLs from ALL Services** 🚀\n\n"
+        f"URL: `{long_url}`\n\n"
+        f"⏳ Please wait while I contact all services...",
+        parse_mode='Markdown'
+    )
+
+    # Get results from all services
+    results = await shorten_all_services(long_url)
+    
+    # Format the results message
+    response_text = format_results_message(long_url, results)
+    
+    # Send the results
+    await query.edit_message_text(
+        response_text,
+        parse_mode='Markdown',
+        disable_web_page_preview=True
+    )
+
+    return ConversationHandler.END
 
 async def select_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the user's service selection via inline keyboard."""
@@ -240,53 +419,12 @@ async def select_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return ConversationHandler.END
 
-    # Get the service name for display
-    service_names = {
-        'gplinks': 'GPLinks', 
-        'shrinkearn': 'ShrinkEarn', 
-        'shrtfly': 'ShrtFly', 
-        'fclc': 'FC.LC'
-    }
-    display_name = service_names.get(service_data, service_data.upper())
-
-    # Update the message to show processing
-    processing_message = await query.edit_message_text(
-        f"⏳ Shortening your link using **{display_name}**...\n\n"
-        f"URL: `{long_url}`",
-        parse_mode='Markdown'
-    )
-
-    # Call the API function
-    short_link = shorten_link_api(service_data, long_url)
-
-    # Prepare response based on result
-    if short_link.startswith("http"):
-        # Success case
-        response_text = (
-            f"✨ **Shortening Complete!** ✨\n\n"
-            f"**Service:** {display_name}\n"
-            f"**Original URL:** `{long_url}`\n"
-            f"**Short Link:** `{short_link}`\n\n"
-            f"✅ You can copy and share the link above.\n"
-            f"Use /shorten to shorten another link."
-        )
+    if service_data == 'all':
+        # Process all services
+        return await process_all_services(long_url, query)
     else:
-        # Error case
-        response_text = (
-            f"❌ **Shortening Failed** ❌\n\n"
-            f"**Service:** {display_name}\n"
-            f"**Error Details:** {short_link}\n\n"
-            f"Please check your API key for {display_name} and try again, "
-            f"or select a different service."
-        )
-
-    await query.edit_message_text(
-        response_text,
-        parse_mode='Markdown',
-        disable_web_page_preview=True
-    )
-
-    return ConversationHandler.END
+        # Process single service
+        return await process_single_service(service_data, long_url, query)
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancels and ends the conversation."""
@@ -364,6 +502,7 @@ def main() -> None:
     except Exception as e:
         logger.error(f"Bot crashed: {e}")
     finally:
+        executor.shutdown()
         logger.info("Bot stopped")
 
 if __name__ == "__main__":
