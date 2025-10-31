@@ -18,7 +18,6 @@ class Config:
     BOT_TOKEN = os.environ.get('BOT_TOKEN')
     SHRINKEARN_API = os.environ.get('SHRINKEARN_API', '')
     SHRTFLY_API = os.environ.get('SHRTFLY_API', '')
-    FCLC_API = os.environ.get('FCLC_API', '')
     GPLINKS_API = os.environ.get('GPLINKS_API', '')
     USE_WEBHOOK = os.environ.get('USE_WEBHOOK', 'true').lower() == 'true'
     WEBHOOK_PORT = int(os.environ.get('PORT', 5000))
@@ -26,9 +25,9 @@ class Config:
     WELCOME_IMAGE_URL = os.environ.get('WELCOME_IMAGE_URL', 'https://iili.io/Kcbrql9.th.jpg')
     
     SUPPORTED_SERVICES = {
-        'bitly': {
-            'name': 'Bitly',
-            'api_url': 'https://api-ssl.bitly.com/v4/shorten',
+        'shrinkearn': {
+            'name': 'Shrinkearn',
+            'api_url': 'https://shrinkearn.com/api',
             'requires_key': True
         },
         'tinyurl': {
@@ -36,9 +35,9 @@ class Config:
             'api_url': 'http://tinyurl.com/api-create.php',
             'requires_key': False
         },
-        'cuttly': {
-            'name': 'Cuttly',
-            'api_url': 'https://cutt.ly/api/api.php',
+        'shrtFly': {
+            'name': 'ShrtFly',
+            'api_url': 'https://shrtfly.com/api',
             'requires_key': True
         },
         'gplinks': {
@@ -114,15 +113,15 @@ class URLShortenerBot:
     def shorten_url(self, url, service):
         """Shorten URL using the specified service"""
         try:
-            # Validate URL first
+            # BitlyValidate URL first
             if not self.is_valid_url(url):
                 return None
 
             logger.info(f"Shortening URL with {service}: {url}")
 
-            if service == 'bitly':
-                if not config.BITLY_TOKEN:
-                    logger.error("Bitly token not configured")
+            if service == 'shrinkearn':
+                if not config.SHRINKEARN_API:
+                    logger.error("Shrinkearn token not configured")
                     return None
                 
                 headers = {
@@ -139,7 +138,7 @@ class URLShortenerBot:
                 if response.status_code == 200:
                     return response.json()['link']
                 else:
-                    logger.error(f"Bitly API error: {response.status_code} - {response.text}")
+                    logger.error(f"Shrinkearn API error: {response.status_code} - {response.text}")
                     return None
             
             elif service == 'tinyurl':
@@ -155,12 +154,12 @@ class URLShortenerBot:
                     logger.error(f"TinyURL API error: {response.status_code}")
                     return None
             
-            elif service == 'cuttly':
-                if not config.CUTTLY_API:
-                    logger.error("Cuttly API key not configured")
+            elif service == 'shrtfly':
+                if not config.SHRTFLY_API:
+                    logger.error("Shrtfly API key not configured")
                     return None
                 
-                params = {'key': config.CUTTLY_API, 'short': url}
+                params = {'key': config.SHRTFLY_API, 'short': url}
                 response = requests.get(
                     config.SUPPORTED_SERVICES[service]['api_url'], 
                     params=params, 
@@ -171,10 +170,10 @@ class URLShortenerBot:
                     if data.get('url', {}).get('status') == 7:
                         return data['url']['shortLink']
                     else:
-                        logger.error(f"Cuttly API error: {data}")
+                        logger.error(f"Shrtfly  API error: {data}")
                         return None
                 else:
-                    logger.error(f"Cuttly HTTP error: {response.status_code}")
+                    logger.error(f"Shrtfly HTTP error: {response.status_code}")
                     return None
             
             elif service == 'gplinks':
@@ -314,9 +313,9 @@ Simply send me a URL or use /shorten command to begin!
 `/shorten https://www.example.com/very-long-url-path`
 
 🛠 **Supported Services:**
-✅ **Bitly** - Professional URL shortening with analytics
+✅ **SHRINKEARN** - Professional URL shortening with analytics
 ✅ **TinyURL** - Simple, reliable, no API key required  
-✅ **Cuttly** - Advanced analytics and customization
+✅ **SHRTFLY** - Advanced analytics and customization
 ✅ **GPLinks** - Earn money from your shortened links!
 
 💰 **Monetization:**
@@ -340,12 +339,12 @@ Use `/status` to check your API key configuration.
                 service_name = service_info['name']
                 requires_key = service_info['requires_key']
                 
-                if service_key == 'bitly':
-                    has_key = bool(config.BITLY_TOKEN)
-                    key_preview = config.BITLY_TOKEN[:8] + '...' if has_key else 'Not set'
-                elif service_key == 'cuttly':
-                    has_key = bool(config.CUTTLY_API)
-                    key_preview = config.CUTTLY_API[:8] + '...' if has_key else 'Not set'
+                if service_key == 'shrinkearn':
+                    has_key = bool(config.SHRINKEARN_API)
+                    key_preview = config.SHRINKEARN_API[:8] + '...' if has_key else 'Not set'
+                elif service_key == 'shrtfly':
+                    has_key = bool(config.SHRTFLY_API)
+                    key_preview = config.SHRTFLY_API[:8] + '...' if has_key else 'Not set'
                 elif service_key == 'gplinks':
                     has_key = bool(config.GPLINKS_API)
                     key_preview = config.GPLINKS_API[:8] + '...' if has_key else 'Not set'
