@@ -14,15 +14,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- HANDLERS (same as before) ---
+# --- HANDLERS ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and instructions on /start."""
     welcome_message = (
-        "Hello! I'm your Image Uploader Bot. 📸\n\n"
-        "Just send me an image (as a *photo*, not a document) and I will "
-        "upload it to ImgBB and send you the direct URL.\n\n"
-        f"🚨 *File Limit:* Images must be under {config.MAX_SIZE_MB}MB."
+        "🤖 *Image Uploader Bot*\n\n"
+        "Send me an image as a *photo* (not a document) and I'll upload it to ImgBB "
+        "and send you the direct URL.\n\n"
+        f"📁 *File Limit:* Under {config.MAX_SIZE_MB}MB\n"
+        "⚡ *Supported:* JPEG, PNG, GIF\n\n"
+        "Use /help for more instructions."
     )
     await update.message.reply_text(
         welcome_message,
@@ -32,13 +34,26 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends help instructions."""
     help_message = (
-        "How to use:\n"
-        "1. Send a single image to this chat.\n"
-        "2. Ensure the image is sent as a *Photo* (not compressed as a file).\n"
-        f"3. The file size limit is {config.MAX_SIZE_MB}MB.\n"
-        "I will reply with the ImgBB link upon successful upload."
+        "📖 *How to use this bot:*\n\n"
+        "1. 📸 Send a single image to this chat\n"
+        "2. 🖼️ Make sure it's sent as a *Photo* (not as a file)\n"
+        f"3. 📊 File size limit: {config.MAX_SIZE_MB}MB\n"
+        "4. ⏳ Wait for the upload to complete\n\n"
+        "I'll reply with the ImgBB direct URL and delete link."
     )
     await update.message.reply_text(help_message)
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows bot status."""
+    mode = "🌐 Webhook" if config.WEBHOOK_URL else "🔍 Polling"
+    status_message = (
+        f"🤖 *Bot Status*\n\n"
+        f"*Mode:* {mode}\n"
+        f"*Max File Size:* {config.MAX_SIZE_MB}MB\n"
+        f"*Port:* {config.PORT}\n"
+        f"*Status:* ✅ Operational"
+    )
+    await update.message.reply_text(status_message)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles incoming photo messages, checks size, and uploads to ImgBB."""
@@ -54,6 +69,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # 2. Get the file object to check size and download
     try:
         file = await context.bot.get_file(photo_file.file_id)
+        logger.info(f"Processing photo: {file.file_id}, size: {file.file_size} bytes")
     except Exception as e:
         logger.error(f"Error retrieving file object: {e}")
         await message.reply_text("❌ Error: Could not retrieve the file details from Telegram. Please try again.")
@@ -61,26 +77,31 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     # 3. Check the file size limit
     if file.file_size > config.MAX_SIZE_BYTES:
+        size_mb = file.file_size / (1024 * 1024)
         await message.reply_text(
-            f"🚫 *Error*: The image is too large ({file.file_size / (1024 * 1024):.2f}MB). "
+            f"🚫 *Error*: The image is too large ({size_mb:.2f}MB). "
             f"The limit is {config.MAX_SIZE_MB}MB.",
             parse_mode=constants.ParseMode.MARKDOWN
         )
         return
 
-    await message.reply_text(f"Uploading file ({file.file_size / (1024 * 1024):.2f}MB)... Please wait.")
+    # 4. Show upload progress
+    progress_msg = await message.reply_text(
+        f"📤 Uploading image ({file.file_size / (1024 * 1024):.2f}MB)... Please wait."
+    )
 
-    # 4. Download the file contents into memory
+    # 5. Download the file contents into memory
     file_bytes = BytesIO()
     try:
         await file.download_to_memory(file_bytes)
         file_bytes.seek(0)
+        logger.info(f"Downloaded photo successfully, size: {len(file_bytes.getvalue())} bytes")
     except Exception as e:
         logger.error(f"Error downloading photo: {e}")
-        await message.reply_text("❌ Error: Could not download the image from Telegram servers.")
+        await progress_msg.edit_text("❌ Error: Could not download the image from Telegram servers.")
         return
 
-    # 5. Prepare and send the image to ImgBB
+    # 6. Prepare and send the image to ImgBB
     payload = {
         'key': config.IMGBB_API_KEY
     }
@@ -90,98 +111,140 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     }
 
     try:
+        # Update progress
+        await progress_msg.edit_text("🔄 Uploading to ImgBB...")
+        
         # Perform the HTTP POST request to ImgBB
-        imgbb_response = requests.post(config.IMGBB_UPLOAD_URL, data=payload, files=files)
+        imgbb_response = requests.post(config.IMGBB_UPLOAD_URL, data=payload, files=files, timeout=30)
         imgbb_response.raise_for_status()
         
         data = imgbb_response.json()
+        logger.info(f"ImgBB response: {data.get('status')}")
 
-        # 6. Process ImgBB response
+        # 7. Process ImgBB response
         if data.get('success') and data.get('data'):
-            image_url = data['data']['url']
-            delete_url = data['data']['delete_url']
+            image_data = data['data']
+            image_url = image_data['url']
+            delete_url = image_data['delete_url']
+            image_title = image_data.get('title', 'Uploaded Image')
             
             # Send the result back to the user
             success_message = (
                 "✅ *Upload Successful!*\n\n"
-                f"*Direct URL:* `{image_url}`\n\n"
-                f"You can delete this image later using this link: `{delete_url}`"
+                f"*Title:* {image_title}\n"
+                f"*Direct URL:* `{image_url}`\n"
+                f"*View URL:* {image_data['display_url']}\n\n"
+                f"🗑️ *Delete Link:* `{delete_url}`"
             )
-            await message.reply_text(
+            await progress_msg.edit_text(
                 success_message,
                 parse_mode=constants.ParseMode.MARKDOWN
             )
         else:
-            error_message = data.get('error', 'Unknown upload error.')
+            error_message = data.get('error', {}).get('message', 'Unknown upload error.')
             logger.error(f"ImgBB API error: {error_message}")
-            await message.reply_text(f"❌ ImgBB Upload Failed: {error_message}")
+            await progress_msg.edit_text(f"❌ ImgBB Upload Failed: {error_message}")
 
     except requests.exceptions.HTTPError as http_err:
         logger.error(f"HTTP error occurred: {http_err}")
-        await message.reply_text(f"❌ Upload Failed due to HTTP Error: {http_err.response.status_code}")
+        await progress_msg.edit_text(f"❌ Upload Failed: HTTP Error {http_err.response.status_code}")
+    except requests.exceptions.Timeout:
+        logger.error("ImgBB request timed out")
+        await progress_msg.edit_text("❌ Upload Failed: Request timed out. Please try again.")
     except requests.exceptions.RequestException as req_err:
         logger.error(f"Request error occurred: {req_err}")
-        await message.reply_text("❌ Upload Failed: Could not connect to the ImgBB server.")
+        await progress_msg.edit_text("❌ Upload Failed: Could not connect to the ImgBB server.")
     except Exception as e:
         logger.error(f"An unexpected error occurred during upload: {e}")
-        await message.reply_text("❌ An unexpected error occurred during the upload process.")
+        await progress_msg.edit_text("❌ An unexpected error occurred during the upload process.")
+
+async def handle_document_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles images sent as documents."""
+    await update.message.reply_text(
+        "📎 Please send the image as a *Photo* (not as a document) for automatic upload.\n\n"
+        "Tip: When sending an image, use the 'Photo' option instead of 'Document'.",
+        parse_mode=constants.ParseMode.MARKDOWN
+    )
 
 async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles any non-photo messages."""
     await update.message.reply_text(
-        "I only handle image uploads. Please send me a *photo* to upload."
+        "🤖 I only handle image uploads. Send me a *photo* to upload to ImgBB.\n\n"
+        "Use /help for instructions or /status to check bot status.",
+        parse_mode=constants.ParseMode.MARKDOWN
     )
 
-# --- WEBHOOK SETUP FOR PORT 8000 ---
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles errors in the telegram bot."""
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+    
+    # Notify user about the error
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "❌ An error occurred while processing your request. Please try again."
+        )
 
-async def set_webhook(application: Application, webhook_url: str) -> None:
-    """Set up the webhook for the bot."""
-    await application.bot.set_webhook(
-        url=webhook_url,
-        drop_pending_updates=True
-    )
-    logger.info(f"Webhook set to: {webhook_url}")
+# --- WEBHOOK SETUP ---
 
-# --- MAIN FUNCTION WITH PORT 8000 ---
+async def setup_webhook(application: Application):
+    """Set up the webhook if configured."""
+    if config.WEBHOOK_URL:
+        webhook_url = f"{config.WEBHOOK_URL}"
+        await application.bot.set_webhook(
+            url=webhook_url,
+            secret_token=config.WEBHOOK_SECRET,
+            drop_pending_updates=True
+        )
+        logger.info(f"Webhook set to: {webhook_url}")
+
+# --- MAIN FUNCTION ---
 
 def main() -> None:
-    """Start the bot with webhook on port 8000."""
+    """Start the bot."""
     # Create the Application
     application = Application.builder().token(config.BOT_TOKEN).build()
 
     # Register handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo))
+    application.add_handler(MessageHandler(filters.Document.IMAGE & ~filters.COMMAND, handle_document_image))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
-
-    # Webhook configuration
-    WEBHOOK_URL = getattr(config, 'WEBHOOK_URL', None)
-    PORT = getattr(config, 'PORT', 8000)
     
-    if WEBHOOK_URL:
-        # Webhook mode (for production)
-        logger.info(f"Starting webhook on port {PORT}...")
+    # Register error handler
+    application.add_error_handler(error_handler)
+
+    # Start the Bot
+    if config.WEBHOOK_URL:
+        # Webhook mode (production)
+        logger.info(f"🚀 Starting webhook server on {config.LISTEN_ADDRESS}:{config.PORT}")
+        logger.info(f"🌐 Webhook URL: {config.WEBHOOK_URL}")
         
-        # Set up webhook
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=WEBHOOK_URL,
-            secret_token=getattr(config, 'WEBHOOK_SECRET', None),
+        try:
+            application.run_webhook(
+                listen=config.LISTEN_ADDRESS,
+                port=config.PORT,
+                webhook_url=config.WEBHOOK_URL,
+                secret_token=config.WEBHOOK_SECRET,
+                drop_pending_updates=True
+            )
+        except Exception as e:
+            logger.error(f"Webhook startup failed: {e}")
+            logger.info("Falling back to polling mode...")
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
+    else:
+        # Polling mode (development)
+        logger.info("🔍 Starting in polling mode...")
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True
         )
-    else:
-        # Polling mode (for development)
-        logger.info("Starting polling...")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     try:
         main()
-    except ValueError as e:
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(f"Configuration Error: {e}")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
