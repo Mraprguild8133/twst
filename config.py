@@ -9,7 +9,7 @@ class Config:
     IMGBB_API_KEY = os.getenv('IMGBB_API_KEY', 'your_imgbb_api_key_here')
     
     # File size limits
-    MAX_SIZE_MB = int(os.getenv('MAX_SIZE_MB', 32))
+    MAX_SIZE_MB = int(os.getenv('MAX_SIZE_MB', 20))
     MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024
     
     # ImgBB API endpoint
