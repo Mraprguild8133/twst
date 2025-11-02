@@ -342,7 +342,7 @@ def main():
     logger.info(f"Will check feed every {config.CHECK_INTERVAL_SECONDS} seconds")
     logger.info(f"Daily summary at {config.DAILY_SUMMARY_HOUR}:00")
     
-    # Fixed: Removed port parameter from run_polling()
+    # Start polling - no port needed for Telegram polling
     application.run_polling()
 
 if __name__ == "__main__":
