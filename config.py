@@ -1,56 +1,34 @@
-# config.py
 import os
+from typing import Optional
 
 class Config:
-    """Configuration class for the Telegram bot."""
+    """Configuration class for the RSS Bot"""
     
-    # Required API keys
-    BOT_TOKEN = os.getenv('BOT_TOKEN', 'your_bot_token_here')
-    IMGBB_API_KEY = os.getenv('IMGBB_API_KEY', 'your_imgbb_api_key_here')
+    # Telegram Bot Configuration
+    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
+    CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
     
-    # File size limits
-    MAX_SIZE_MB = int(os.getenv('MAX_SIZE_MB', 20))
-    MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024
+    # RSS Feed Configuration
+    RSS_FEED_URL: str = os.getenv("RSS_FEED_URL", "")
+    CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "600"))
     
-    # ImgBB API endpoint
-    IMGBB_UPLOAD_URL = "https://api.imgbb.com/1/upload"
+    # File Storage
+    LAST_SENT_FILE: str = os.getenv("LAST_SENT_FILE", "last_sent_link.txt")
     
-    # Webhook configuration
-    WEBHOOK_URL = os.getenv('WEBHOOK_URL', None)  # Set to None for polling mode
-    PORT = int(os.getenv('PORT', 8000))
-    WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'your_webhook_secret_here')
-    
-    # Server settings
-    LISTEN_ADDRESS = os.getenv('LISTEN_ADDRESS', '0.0.0.0')
-    
-    def validate(self):
-        """Validate configuration settings."""
-        if not self.BOT_TOKEN or self.BOT_TOKEN == 'your_bot_token_here':
-            raise ValueError("BOT_TOKEN is not set properly")
+    # Validation
+    @classmethod
+    def validate(cls) -> bool:
+        """Validate that required configuration is set"""
+        if not cls.BOT_TOKEN:
+            raise ValueError("BOT_TOKEN environment variable is required")
         
-        if not self.IMGBB_API_KEY or self.IMGBB_API_KEY == 'your_imgbb_api_key_here':
-            raise ValueError("IMGBB_API_KEY is not set properly")
+        if not cls.CHAT_ID:
+            raise ValueError("TELEGRAM_CHAT_ID environment variable is required")
         
-        if self.MAX_SIZE_MB > 20:
-            raise ValueError("MAX_SIZE_MB cannot exceed 20MB due to Telegram limitations")
-        
-        if self.WEBHOOK_URL and not self.WEBHOOK_URL.startswith('https://'):
-            print("⚠️  Warning: WEBHOOK_URL should use HTTPS for production")
+        if not cls.RSS_FEED_URL:
+            raise ValueError("RSS_FEED_URL environment variable is required")
         
         return True
 
 # Create config instance
 config = Config()
-
-# Validate configuration
-try:
-    config.validate()
-    print("✅ Configuration validated successfully!")
-    print(f"📁 Max file size: {config.MAX_SIZE_MB}MB")
-    print(f"🌐 Mode: {'Webhook' if config.WEBHOOK_URL else 'Polling'}")
-    if config.WEBHOOK_URL:
-        print(f"🔗 Webhook URL: {config.WEBHOOK_URL}")
-        print(f"🔄 Port: {config.PORT}")
-except ValueError as e:
-    print(f"❌ Configuration error: {e}")
-    raise
