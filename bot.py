@@ -225,40 +225,56 @@ class RSSBot:
         await update.message.reply_text(text, parse_mode='HTML')
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Check bot status and statistics."""
+        """Check bot status and statistics with enhanced HTML formatting."""
         job_name = 'rss_checker'
         daily_job_name = 'daily_summary'
         
         jobs = context.job_queue.get_jobs_by_name(job_name)
         daily_jobs = context.job_queue.get_jobs_by_name(daily_job_name)
         
-        status_text = "<b>🤖 RSS Bot Status</b>\n\n"
+        # Enhanced HTML formatting
+        status_text = "🤖 <b>RSS Bot Status</b>\n\n"
         
+        # Monitoring Status with emojis and better formatting
         if jobs:
             next_check = jobs[0].next_t
-            status_text += f"✅ <b>Real-time monitoring:</b> Active\n"
-            status_text += f"   Next check: {next_check.strftime('%H:%M:%S')}\n"
+            status_text += "🟢 <b>Real-time Monitoring</b>\n"
+            status_text += f"   ⏰ Next check: <code>{next_check.strftime('%H:%M:%S')}</code>\n"
+            status_text += f"   🔄 Interval: <code>{config.CHECK_INTERVAL_SECONDS // 60} minutes</code>\n"
         else:
-            status_text += "❌ <b>Real-time monitoring:</b> Inactive\n"
+            status_text += "🔴 <b>Real-time Monitoring</b>\n"
+            status_text += "   ❌ <i>Inactive - Use /start to activate</i>\n"
         
+        status_text += "\n"
+        
+        # Daily Summary Status
         if daily_jobs:
             next_daily = daily_jobs[0].next_t
-            status_text += f"✅ <b>Daily summary:</b> Active\n"
-            status_text += f"   Next summary: {next_daily.strftime('%Y-%m-%d %H:%M')}\n"
+            status_text += "🟢 <b>Daily Summary</b>\n"
+            status_text += f"   ⏰ Next summary: <code>{next_daily.strftime('%Y-%m-%d %H:%M')}</code>\n"
+            status_text += f"   🕘 Scheduled: <code>{config.DAILY_SUMMARY_HOUR}:00 daily</code>\n"
         else:
-            status_text += "❌ <b>Daily summary:</b> Inactive\n"
+            status_text += "🔴 <b>Daily Summary</b>\n"
+            status_text += "   ❌ <i>Inactive - Use /start to activate</i>\n"
         
-        status_text += f"\n<b>Statistics:</b>\n"
-        status_text += f"📊 Total sent posts: {len(self.sent_links)}\n"
-        status_text += f"📡 Monitoring feed: {config.RSS_FEED_URL}\n"
+        status_text += "\n"
+        status_text += "📊 <b>Statistics</b>\n"
+        status_text += f"   📈 Total posts sent: <b>{len(self.sent_links)}</b>\n"
+        status_text += f"   📡 Feed URL: <code>{config.RSS_FEED_URL}</code>\n"
+        status_text += f"   👥 Chat ID: <code>{config.CHAT_ID}</code>\n"
         
         last_link = self.load_last_link()
         if last_link:
-            status_text += f"📎 Last sent: {last_link[:30]}...\n"
+            status_text += f"   📎 Last sent: <code>{last_link[:50]}...</code>\n"
         else:
-            status_text += "📎 Last sent: None\n"
+            status_text += "   📎 Last sent: <i>None</i>\n"
         
-        status_text += f"\nUse /check to manually fetch new posts now!"
+        status_text += "\n"
+        status_text += "💡 <b>Commands</b>\n"
+        status_text += "   /check - Fetch new posts now\n"
+        status_text += "   /stats - Detailed statistics\n"
+        status_text += "   /stop - Stop monitoring\n"
+        status_text += "   /start - Restart monitoring"
 
         await update.message.reply_text(status_text, parse_mode='HTML')
 
@@ -326,7 +342,8 @@ def main():
     logger.info(f"Will check feed every {config.CHECK_INTERVAL_SECONDS} seconds")
     logger.info(f"Daily summary at {config.DAILY_SUMMARY_HOUR}:00")
     
-    application.run_polling()
+    # Start the application on port 8000
+    application.run_polling(port=8000)
 
 if __name__ == "__main__":
     main()
