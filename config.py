@@ -10,10 +10,12 @@ class Config:
     
     # RSS Feed Configuration
     RSS_FEED_URL: str = os.getenv("RSS_FEED_URL", "")
-    CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "600"))
+    CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "600"))  # 10 minutes
+    DAILY_SUMMARY_HOUR: int = int(os.getenv("DAILY_SUMMARY_HOUR", "9"))  # 9 AM daily
     
     # File Storage
     LAST_SENT_FILE: str = os.getenv("LAST_SENT_FILE", "last_sent_link.txt")
+    SENT_LINKS_FILE: str = os.getenv("SENT_LINKS_FILE", "sent_links.json")
     
     # Validation
     @classmethod
