@@ -20,10 +20,6 @@ logger = logging.getLogger(__name__)
 class RSSBot:
     def __init__(self):
         self.sent_links = self.load_sent_links()
-        self.bot_start_time = datetime.now()
-        self.last_check_time = None
-        self.last_error = None
-        self.total_posts_sent = len(self.sent_links)
         
     def load_last_link(self):
         """Loads the last sent link from the persistence file."""
@@ -58,23 +54,17 @@ class RSSBot:
     async def check_new_posts(self, context: ContextTypes.DEFAULT_TYPE):
         """The function scheduled to run periodically to check the RSS feed."""
         logger.info("Starting scheduled RSS feed check...")
-        self.last_check_time = datetime.now()
 
         try:
             feed = feedparser.parse(config.RSS_FEED_URL)
-            self.last_error = None
             
             # Check if feed was parsed successfully
             if feed.bozo:
-                error_msg = f"RSS feed parsing error: {feed.bozo_exception}"
-                logger.error(error_msg)
-                self.last_error = error_msg
+                logger.error(f"RSS feed parsing error: {feed.bozo_exception}")
                 return
                 
         except Exception as e:
-            error_msg = f"Error fetching RSS feed: {e}"
-            logger.error(error_msg)
-            self.last_error = error_msg
+            logger.error(f"Error fetching RSS feed: {e}")
             return
 
         new_posts = []
@@ -118,7 +108,6 @@ class RSSBot:
                 )
                 self.sent_links.add(link)
                 sent_count += 1
-                self.total_posts_sent += 1
                 logger.info(f"Sent new post: {link}")
                 
                 # Add small delay between messages to avoid rate limiting
@@ -150,10 +139,11 @@ class RSSBot:
             today = datetime.now().date()
             today_posts = []
             
-            for entry in feed.entries[:10]:
+            for entry in feed.entries[:10]:  # Check last 10 posts
                 link = entry.link
                 published = getattr(entry, 'published_parsed', None)
                 
+                # If we have published date, check if it's from today
                 if published:
                     published_date = datetime(*published[:6]).date()
                     if published_date == today and link not in self.sent_links:
@@ -163,7 +153,7 @@ class RSSBot:
                 summary_message = f"<b>📊 Daily RSS Summary - {today.strftime('%Y-%m-%d')}</b>\n\n"
                 summary_message += f"Found {len(today_posts)} new posts today:\n\n"
                 
-                for i, entry in enumerate(today_posts[:5], 1):
+                for i, entry in enumerate(today_posts[:5], 1):  # Show max 5 posts in summary
                     title = entry.title
                     link = entry.link
                     summary_message += f"{i}. <a href='{link}'>{title}</a>\n"
@@ -198,14 +188,16 @@ class RSSBot:
         daily_jobs_running = bool(context.job_queue.get_jobs_by_name(daily_job_name))
 
         if not jobs_running:
+            # Start periodic checking
             context.job_queue.run_repeating(
                 self.check_new_posts, 
                 interval=config.CHECK_INTERVAL_SECONDS, 
-                first=10,
+                first=10,  # Start after 10 seconds
                 name=job_name
             )
 
         if not daily_jobs_running:
+            # Calculate time until next daily summary (9 AM)
             now = datetime.now()
             target_time = now.replace(hour=config.DAILY_SUMMARY_HOUR, minute=0, second=0, microsecond=0)
             if now >= target_time:
@@ -213,9 +205,10 @@ class RSSBot:
             
             seconds_until_target = (target_time - now).total_seconds()
             
+            # Start daily summary
             context.job_queue.run_repeating(
                 self.send_daily_summary,
-                interval=86400,
+                interval=86400,  # 24 hours
                 first=seconds_until_target,
                 name=daily_job_name
             )
@@ -295,36 +288,45 @@ class RSSBot:
 
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show detailed statistics."""
-        uptime = datetime.now() - self.bot_start_time
-        hours, remainder = divmod(int(uptime.total_seconds()), 3600)
-        minutes, seconds = divmod(remainder, 60)
-        
         stats_text = (
             f"<b>📈 RSS Bot Statistics</b>\n\n"
-            f"📊 Total posts sent: <b>{self.total_posts_sent}</b>\n"
-            f"⏰ Uptime: <b>{hours}h {minutes}m {seconds}s</b>\n"
-            f"📅 Bot started: <b>{self.bot_start_time.strftime('%Y-%m-%d %H:%M')}</b>\n"
-            f"🔄 Check interval: <b>{config.CHECK_INTERVAL_SECONDS // 60} minutes</b>\n"
-            f"📢 Daily summary: <b>{config.DAILY_SUMMARY_HOUR}:00</b>\n"
-            f"🌐 Web status: <b>Port {config.WEB_SERVER_PORT}</b>\n\n"
+            f"📊 Total posts sent: <b>{len(self.sent_links)}</b>\n"
+            f"📅 Bot started: <b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</b>\n"
+            f"⏰ Check interval: <b>{config.CHECK_INTERVAL_SECONDS // 60} minutes</b>\n"
+            f"📢 Daily summary: <b>{config.DAILY_SUMMARY_HOUR}:00</b>\n\n"
             f"<i>Bot is running smoothly! 🚀</i>"
         )
         await update.message.reply_text(stats_text, parse_mode='HTML')
 
-    def get_bot_status(self):
-        """Get bot status for web interface."""
-        return {
-            "status": "running",
-            "bot_start_time": self.bot_start_time.isoformat(),
-            "last_check_time": self.last_check_time.isoformat() if self.last_check_time else None,
-            "total_posts_sent": self.total_posts_sent,
-            "last_error": self.last_error,
-            "uptime_seconds": int((datetime.now() - self.bot_start_time).total_seconds()),
-            "feed_url": config.RSS_FEED_URL,
-            "check_interval": config.CHECK_INTERVAL_SECONDS,
-            "daily_summary_hour": config.DAILY_SUMMARY_HOUR,
-            "web_port": config.WEB_SERVER_PORT
-        }
-
 # Global bot instance
 rss_bot = RSSBot()
+
+def main():
+    """Starts the bot using the Application builder pattern."""
+    try:
+        # Validate configuration
+        config.validate()
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        return
+
+    logger.info("Initializing Telegram Application...")
+    
+    # Create the Application
+    application = Application.builder().token(config.BOT_TOKEN).build()
+
+    # Add command handlers
+    application.add_handler(CommandHandler("start", rss_bot.start_command))
+    application.add_handler(CommandHandler("status", rss_bot.status_command))
+    application.add_handler(CommandHandler("stop", rss_bot.stop_command))
+    application.add_handler(CommandHandler("check", rss_bot.force_check_command))
+    application.add_handler(CommandHandler("stats", rss_bot.stats_command))
+
+    logger.info("Bot is ready. Start polling...")
+    logger.info(f"Will check feed every {config.CHECK_INTERVAL_SECONDS} seconds")
+    logger.info(f"Daily summary at {config.DAILY_SUMMARY_HOUR}:00")
+    
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
