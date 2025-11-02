@@ -342,8 +342,8 @@ def main():
     logger.info(f"Will check feed every {config.CHECK_INTERVAL_SECONDS} seconds")
     logger.info(f"Daily summary at {config.DAILY_SUMMARY_HOUR}:00")
     
-    # Start the application on port 8000
-    application.run_polling(port=8000)
+    # Fixed: Removed port parameter from run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
