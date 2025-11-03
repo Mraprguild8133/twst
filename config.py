@@ -1,40 +1,34 @@
 import os
-from typing import Optional
+from typing import Set
 
 class Config:
-    """Configuration class for the RSS Bot"""
-    
-    # Telegram Bot Configuration
-    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
-    CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
-    
-    # RSS Feed Configuration
-    RSS_FEED_URL: str = os.getenv("RSS_FEED_URL", "")
-    CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "600"))
-    DAILY_SUMMARY_HOUR: int = int(os.getenv("DAILY_SUMMARY_HOUR", "9"))
-    
-    # Web Server Configuration
-    WEB_SERVER_PORT: int = int(os.getenv("PORT", "8000"))
-    WEB_SERVER_HOST: str = os.getenv("HOST", "0.0.0.0")
-    
-    # File Storage
-    LAST_SENT_FILE: str = os.getenv("LAST_SENT_FILE", "last_sent_link.txt")
-    SENT_LINKS_FILE: str = os.getenv("SENT_LINKS_FILE", "sent_links.json")
-    
-    # Validation
-    @classmethod
-    def validate(cls) -> bool:
-        """Validate that required configuration is set"""
-        if not cls.BOT_TOKEN:
-            raise ValueError("BOT_TOKEN environment variable is required")
+    def __init__(self):
+        # Telegram Bot Configuration
+        self.BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token_here")
+        self.CHAT_ID = os.getenv("CHAT_ID", "your_chat_id_here")
         
-        if not cls.CHAT_ID:
-            raise ValueError("TELEGRAM_CHAT_ID environment variable is required")
+        # RSS Feed Configuration
+        self.RSS_FEED_URL = os.getenv("RSS_FEED_URL", "https://example.com/feed")
         
-        if not cls.RSS_FEED_URL:
-            raise ValueError("RSS_FEED_URL environment variable is required")
+        # Timing Configuration
+        self.CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL", 300))  # 5 minutes
+        self.DAILY_SUMMARY_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", 9))  # 9 AM
         
-        return True
+        # File Paths
+        self.SENT_LINKS_FILE = "sent_links.json"
+        self.LAST_SENT_FILE = "last_sent.txt"
+        
+        # Flask Configuration
+        self.FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
+        self.FLASK_PORT = int(os.getenv("FLASK_PORT", 8000))
+    
+    def validate(self):
+        """Validate configuration"""
+        if not self.BOT_TOKEN or self.BOT_TOKEN == "your_bot_token_here":
+            raise ValueError("BOT_TOKEN is not set")
+        if not self.CHAT_ID or self.CHAT_ID == "your_chat_id_here":
+            raise ValueError("CHAT_ID is not set")
+        if not self.RSS_FEED_URL:
+            raise ValueError("RSS_FEED_URL is not set")
 
-# Create config instance
 config = Config()
