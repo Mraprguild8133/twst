@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import feedparser
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
+from aiohttp import web
 
 # Import configuration
 from config import config
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 class RSSBot:
     def __init__(self):
         self.sent_links = self.load_sent_links()
+        self.application = None
         
     def load_last_link(self):
         """Loads the last sent link from the persistence file."""
@@ -314,11 +316,22 @@ class RSSBot:
         )
         await update.message.reply_text(stats_text, parse_mode='HTML')
 
+    async def health_check(self, request):
+        """Health check endpoint for monitoring."""
+        return web.Response(text="OK", status=200)
+
+    async def setup_web_server(self):
+        """Set up the web server for health checks and potential webhook support."""
+        app = web.Application()
+        app.router.add_get('/health', self.health_check)
+        app.router.add_get('/', self.health_check)
+        return app
+
 # Global bot instance
 rss_bot = RSSBot()
 
-def main():
-    """Starts the bot using the Application builder pattern."""
+async def main_async():
+    """Starts the bot asynchronously with web server support."""
     try:
         # Validate configuration
         config.validate()
@@ -330,6 +343,7 @@ def main():
     
     # Create the Application
     application = Application.builder().token(config.BOT_TOKEN).build()
+    rss_bot.application = application
 
     # Add command handlers
     application.add_handler(CommandHandler("start", rss_bot.start_command))
@@ -338,12 +352,29 @@ def main():
     application.add_handler(CommandHandler("check", rss_bot.force_check_command))
     application.add_handler(CommandHandler("stats", rss_bot.stats_command))
 
-    logger.info("Bot is ready. Start polling...")
+    # Get port from environment (for cloud deployment)
+    port = int(os.environ.get('PORT', 8000))
+    
+    # Start web server for health checks
+    web_app = await rss_bot.setup_web_server()
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    logger.info(f"Web server started on port {port}")
+    logger.info(f"Health check available at: http://0.0.0.0:{port}/health")
+    logger.info("Bot is ready. Starting polling...")
     logger.info(f"Will check feed every {config.CHECK_INTERVAL_SECONDS} seconds")
     logger.info(f"Daily summary at {config.DAILY_SUMMARY_HOUR}:00")
     
-    # Start polling - no port needed for Telegram polling
-    application.run_polling()
+    # Start polling
+    await application.run_polling()
+
+def main():
+    """Main entry point."""
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
