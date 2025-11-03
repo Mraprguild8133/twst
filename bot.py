@@ -2,11 +2,12 @@ import os
 import logging
 import json
 import asyncio
+import threading
 from datetime import datetime, timedelta
 import feedparser
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
-from aiohttp import web
+from flask import Flask, render_template, jsonify
 
 # Import configuration
 from config import config
@@ -18,10 +19,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Flask App
+flask_app = Flask(__name__, template_folder="templates")
+
+@flask_app.route("/")
+def index():
+    """Main dashboard page"""
+    return render_template("index.html")
+
+@flask_app.route("/health")
+def health():
+    """Health check endpoint"""
+    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()})
+
+@flask_app.route("/status")
+def status():
+    """Bot status API endpoint"""
+    if 'rss_bot' in globals():
+        status_info = {
+            "status": "running",
+            "sent_posts_count": len(rss_bot.sent_links),
+            "last_updated": datetime.now().isoformat(),
+            "feed_url": config.RSS_FEED_URL,
+            "check_interval": config.CHECK_INTERVAL_SECONDS
+        }
+    else:
+        status_info = {"status": "bot_not_initialized"}
+    
+    return jsonify(status_info)
+
+@flask_app.route("/metrics")
+def metrics():
+    """Basic metrics endpoint"""
+    if 'rss_bot' in globals():
+        metrics_data = {
+            "total_posts_sent": len(rss_bot.sent_links),
+            "bot_uptime": "unknown",  # You could track this with startup time
+            "feed_url": config.RSS_FEED_URL,
+            "chat_id": config.CHAT_ID
+        }
+    else:
+        metrics_data = {"error": "bot_not_available"}
+    
+    return jsonify(metrics_data)
+
+def run_flask():
+    """Run Flask app in a separate thread"""
+    logger.info("Starting Flask web server on port 8000")
+    flask_app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False)
+
 class RSSBot:
     def __init__(self):
         self.sent_links = self.load_sent_links()
-        self.application = None
         
     def load_last_link(self):
         """Loads the last sent link from the persistence file."""
@@ -316,22 +365,11 @@ class RSSBot:
         )
         await update.message.reply_text(stats_text, parse_mode='HTML')
 
-    async def health_check(self, request):
-        """Health check endpoint for monitoring."""
-        return web.Response(text="OK", status=200)
-
-    async def setup_web_server(self):
-        """Set up the web server for health checks and potential webhook support."""
-        app = web.Application()
-        app.router.add_get('/health', self.health_check)
-        app.router.add_get('/', self.health_check)
-        return app
-
 # Global bot instance
 rss_bot = RSSBot()
 
-async def main_async():
-    """Starts the bot asynchronously with web server support."""
+def main():
+    """Starts the bot using the Application builder pattern."""
     try:
         # Validate configuration
         config.validate()
@@ -341,9 +379,13 @@ async def main_async():
 
     logger.info("Initializing Telegram Application...")
     
+    # Start Flask in a separate thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("Flask web server started in background thread")
+    
     # Create the Application
     application = Application.builder().token(config.BOT_TOKEN).build()
-    rss_bot.application = application
 
     # Add command handlers
     application.add_handler(CommandHandler("start", rss_bot.start_command))
@@ -352,29 +394,13 @@ async def main_async():
     application.add_handler(CommandHandler("check", rss_bot.force_check_command))
     application.add_handler(CommandHandler("stats", rss_bot.stats_command))
 
-    # Get port from environment (for cloud deployment)
-    port = int(os.environ.get('PORT', 8000))
-    
-    # Start web server for health checks
-    web_app = await rss_bot.setup_web_server()
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    logger.info(f"Web server started on port {port}")
-    logger.info(f"Health check available at: http://0.0.0.0:{port}/health")
-    logger.info("Bot is ready. Starting polling...")
+    logger.info("Bot is ready. Start polling...")
     logger.info(f"Will check feed every {config.CHECK_INTERVAL_SECONDS} seconds")
     logger.info(f"Daily summary at {config.DAILY_SUMMARY_HOUR}:00")
+    logger.info(f"Web dashboard available at http://localhost:8000")
     
-    # Start polling
-    await application.run_polling()
-
-def main():
-    """Main entry point."""
-    asyncio.run(main_async())
+    # Start polling - no port needed for Telegram polling
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
